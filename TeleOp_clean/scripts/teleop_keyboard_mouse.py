@@ -221,7 +221,7 @@ class TeleopLocal:
         self.fps_mouse = fps_mouse
         self.sdk_timeout_s = float(sdk_timeout_s)
         self.video_hz = float(video_hz)
-        self.camera_probe_timeout_s = 1.8
+        self.camera_probe_timeout_s = 3.0
 
         self.linear_vel_mm_s = 60.0
         self.angular_vel_deg_s = 33.75
@@ -477,7 +477,10 @@ class TeleopLocal:
                 if frm is not None and cnt > 0:
                     self.camera_source = src
                     if isinstance(src, int):
-                        print(f"[WARN] camera index {camera_id} unavailable, fallback -> {src}")
+                        if int(src) != int(camera_id):
+                            print(f"[WARN] camera index {camera_id} unavailable, fallback -> {src}")
+                        else:
+                            print(f"[INFO] camera index {src} ready")
                     else:
                         print(f"[INFO] camera source {src} ready")
                     return stream
@@ -1110,8 +1113,8 @@ def main():
     parser.add_argument("--rate-hz", type=float, default=30.0)
     parser.add_argument("--control-hz", type=float, default=120.0)
     parser.add_argument("--data-dir", default=os.path.expanduser("~/Projects/Teleop/TeleOp_clean/data"))
-    parser.add_argument("--camera-id", type=int, default=4)
-    parser.add_argument("--camera-dev", default="/dev/video4")
+    parser.add_argument("--camera-id", type=int, default=1)
+    parser.add_argument("--camera-dev", default=None)
     parser.add_argument("--allow-camera-fallback", action="store_true")
     parser.add_argument("--no-video", action="store_true")
     parser.add_argument("--no-fps-mouse", action="store_true")
