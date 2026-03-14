@@ -29,35 +29,50 @@ PANEL_JOINT_MAX = np.array([2.8, 9.7, 5.6, 1.9, 1.6, 1.3], dtype=np.float64)
 PANEL_GRIPPER_MAX = 1.0
 
 
+class _CapHandle:
+    def __init__(self, opened=False):
+        self._opened = bool(opened)
+
+    def isOpened(self):
+        return self._opened
+
+    def release(self):
+        self._opened = False
+
+
 class CameraStream:
     def __init__(self, source, width=640, height=480):
         self.source = source
         self.width = int(width)
         self.height = int(height)
+        self.frame_size = self.width * self.height * 3
         self.cap = None
-        attempts = []
-        if isinstance(source, str) and source.startswith("/dev/video"):
-            gst = (
-                f"v4l2src device={source} io-mode=2 do-timestamp=true ! "
-                f"video/x-raw,width={self.width},height={self.height},framerate=30/1 ! "
-                "videoconvert ! video/x-raw,format=BGR ! "
-                "appsink drop=true max-buffers=1 sync=false"
-            )
-            attempts.append((gst, cv2.CAP_GSTREAMER))
-            attempts.append((source, cv2.CAP_V4L2))
-        else:
-            attempts.append((source, cv2.CAP_ANY))
-            if hasattr(cv2, "CAP_OBSENSOR"):
-                attempts.append((source, cv2.CAP_OBSENSOR))
-            attempts.append((source, cv2.CAP_V4L2))
-        for open_src, backend in attempts:
-            cap = cv2.VideoCapture(open_src, backend)
-            if cap.isOpened():
-                self.cap = cap
-                break
-            cap.release()
+        self.ffmpeg_proc = None
+        self.use_ffmpeg = False
+        if not self._try_open_ffmpeg():
+            attempts = []
+            if isinstance(source, str) and source.startswith("/dev/video"):
+                gst = (
+                    f"v4l2src device={source} io-mode=2 do-timestamp=true ! "
+                    f"video/x-raw,width={self.width},height={self.height},framerate=30/1 ! "
+                    "videoconvert ! video/x-raw,format=BGR ! "
+                    "appsink drop=true max-buffers=1 sync=false"
+                )
+                attempts.append((gst, cv2.CAP_GSTREAMER))
+                attempts.append((source, cv2.CAP_V4L2))
+            else:
+                attempts.append((source, cv2.CAP_ANY))
+                if hasattr(cv2, "CAP_OBSENSOR"):
+                    attempts.append((source, cv2.CAP_OBSENSOR))
+                attempts.append((source, cv2.CAP_V4L2))
+            for open_src, backend in attempts:
+                cap = cv2.VideoCapture(open_src, backend)
+                if cap.isOpened():
+                    self.cap = cap
+                    break
+                cap.release()
         if self.cap is None:
-            self.cap = cv2.VideoCapture()
+            self.cap = _CapHandle(False)
         self.frame = None
         self.count = 0
         self.ts = 0.0
@@ -67,6 +82,55 @@ class CameraStream:
         self.started = False
         self.configured = False
 
+    def _try_open_ffmpeg(self):
+        if not (isinstance(self.source, str) and self.source.startswith("/dev/video")):
+            return False
+        if shutil.which("ffmpeg") is None:
+            return False
+        cmd = [
+            "ffmpeg",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-fflags",
+            "nobuffer",
+            "-f",
+            "v4l2",
+            "-framerate",
+            "30",
+            "-input_format",
+            "yuyv422",
+            "-video_size",
+            f"{self.width}x{self.height}",
+            "-i",
+            self.source,
+            "-f",
+            "rawvideo",
+            "-pix_fmt",
+            "bgr24",
+            "-",
+        ]
+        try:
+            proc = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                bufsize=self.frame_size * 2,
+            )
+        except Exception:
+            return False
+        time.sleep(0.05)
+        if proc.poll() is not None or proc.stdout is None:
+            try:
+                proc.terminate()
+            except Exception:
+                pass
+            return False
+        self.ffmpeg_proc = proc
+        self.use_ffmpeg = True
+        self.cap = _CapHandle(True)
+        return True
+
     def start(self):
         if not self.started:
             self.started = True
@@ -74,6 +138,20 @@ class CameraStream:
 
     def _loop(self):
         while not self.stop_evt.is_set():
+            if self.use_ffmpeg:
+                if self.ffmpeg_proc is None or self.ffmpeg_proc.stdout is None:
+                    time.sleep(0.05)
+                    continue
+                chunk = self.ffmpeg_proc.stdout.read(self.frame_size)
+                if len(chunk) != self.frame_size:
+                    time.sleep(0.01)
+                    continue
+                frm = np.frombuffer(chunk, dtype=np.uint8).reshape(self.height, self.width, 3).copy()
+                with self.lock:
+                    self.frame = frm
+                    self.count += 1
+                    self.ts = time.monotonic()
+                continue
             if not self.cap.isOpened():
                 time.sleep(0.05)
                 continue
@@ -103,6 +181,15 @@ class CameraStream:
 
     def close(self):
         self.stop_evt.set()
+        if self.ffmpeg_proc is not None and self.ffmpeg_proc.poll() is None:
+            try:
+                self.ffmpeg_proc.terminate()
+                self.ffmpeg_proc.wait(timeout=1.0)
+            except Exception:
+                try:
+                    self.ffmpeg_proc.kill()
+                except Exception:
+                    pass
         if self.started:
             self.thread.join(timeout=1.0)
         self.cap.release()
@@ -360,23 +447,22 @@ class TeleopLocal:
         )
         self.enter_realtime_velocity_mode()
 
-    def open_camera_with_probe(self, camera_id, camera_dev):
+    def iter_camera_sources(self, preferred_cam_id, preferred_cam_dev):
         sources = []
-        if camera_dev:
-            sources.append(camera_dev)
+        if preferred_cam_dev:
+            sources.append(preferred_cam_dev)
+        elif preferred_cam_id is not None:
+            sources.append(int(preferred_cam_id))
         if not self.strict_camera_dev:
-            if camera_dev != "/dev/video4":
-                sources.append("/dev/video4")
-            if camera_dev != "/dev/video6":
-                sources.append("/dev/video6")
-            if camera_id not in (None, 4):
-                sources.append(camera_id)
-            elif 1 not in sources:
-                sources.append(1)
-            if 11 not in sources:
-                sources.append(11)
+            sources.extend([1, "/dev/video4", "/dev/video6", 11])
+        return sources
 
-        for src in sources:
+    def open_camera_with_probe(self, camera_id, camera_dev):
+        tried = set()
+        for src in self.iter_camera_sources(camera_id, camera_dev):
+            if src in tried:
+                continue
+            tried.add(src)
             label = f"camera source {src}" if isinstance(src, str) else f"camera source {src}"
             print(f"[INFO] probing camera source {src}")
             stream = CameraStream(src)

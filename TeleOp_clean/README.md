@@ -34,7 +34,7 @@ Common overrides:
 - robot IP: `192.168.1.199`
 - control port: `502`
 - report ports: `30001`, `30002`, `30003`
-- camera: `/dev/video4`, fallback enabled
+- camera: `index 1`, fallback enabled
 - episode output: `TeleOp_clean/data`
 
 If local forwarded xArm ports already exist on `127.0.0.1:1502/13001/13002/13003`,

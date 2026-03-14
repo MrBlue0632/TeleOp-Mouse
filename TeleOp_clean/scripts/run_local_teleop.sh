@@ -108,8 +108,7 @@ exec python3 "${SCRIPT_PATH}" \
   --report-port-real "${REPORT_REAL_VALUE}" \
   --rate-hz 30 \
   --control-hz 120 \
-  --camera-id 4 \
-  --camera-dev /dev/video4 \
+  --camera-id 1 \
   --allow-camera-fallback \
   --data-dir "${DATA_DIR}" \
   "$@"
