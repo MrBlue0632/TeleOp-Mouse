@@ -155,6 +155,18 @@ class TeleopLocalTests(unittest.TestCase):
         self.assertTrue(app.ensure_velocity_runtime_ready())
         app.enter_realtime_velocity_mode.assert_not_called()
 
+    def test_reset_to_home_on_start_waits_for_servo_motion_to_finish(self):
+        app = self._make_app()
+        app.arm = mock.Mock()
+        app.gripper_speed = 2400.0
+        app.arm.get_state.side_effect = [(0, 2), (0, 2), (0, 1)]
+
+        app.reset_to_home_on_start()
+
+        app.arm.set_servo_angle.assert_called_once()
+        self.assertTrue(app.arm.set_servo_angle.call_args.kwargs["wait"])
+        self.assertGreaterEqual(app.arm.get_state.call_count, 1)
+
     def test_open_camera_with_probe_falls_back_to_next_source(self):
         app = self._make_app()
         frame = np.zeros((480, 640, 3), dtype=np.uint8)

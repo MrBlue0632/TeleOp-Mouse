@@ -3,6 +3,7 @@ import argparse
 import collections
 import json
 import os
+import shutil
 import signal
 import struct
 import subprocess
@@ -236,35 +237,64 @@ class TeleopLocal:
 
         os.makedirs(self.data_dir, exist_ok=True)
 
-        if self.show_video:
-            self.camera = self.open_camera_with_probe(self.camera_id, self.camera_dev)
-            if self.camera is None and self.strict_camera_dev:
-                raise RuntimeError(f"strict camera mode: cannot open {self.camera_dev}")
+    def ensure_robot_ready(self, timeout_s=6.0):
+        deadline = time.monotonic() + timeout_s
+        last_state = None
+        last_err = None
+        while time.monotonic() < deadline:
+            try:
+                self.arm.clean_warn()
+                self.arm.clean_error()
+            except Exception:
+                pass
+            try:
+                self.arm.motion_enable(True)
+                self.arm.set_state(0)
+            except Exception:
+                pass
 
-    def ensure_robot_ready(self):
-        self.arm.motion_enable(enable=True)
-        self.arm.clean_error()
-        self.arm.clean_warn()
-        self.arm.set_state(0)
-        time.sleep(0.2)
-        st = self.arm.get_state()
-        ew = self.arm.get_err_warn_code()
-        state = int(st[1]) if st and st[0] == 0 and len(st) > 1 else -1
-        err = int(ew[1][0]) if ew and ew[0] == 0 and len(ew) > 1 and isinstance(ew[1], (list, tuple)) else -1
-        if err != 0 or state not in (0, 1, 2):
-            raise RuntimeError(f"xArm not ready: state={state}, err={err}")
+            st = self.arm.get_state()
+            ew = self.arm.get_err_warn_code()
+            if st and st[0] == 0 and len(st) > 1:
+                last_state = int(st[1])
+            if ew and ew[0] == 0 and len(ew) > 1 and isinstance(ew[1], (list, tuple)) and len(ew[1]) > 0:
+                last_err = int(ew[1][0])
+            self.last_robot_state = last_state
+            self.last_robot_err = last_err
+
+            if (last_err in (None, 0)) and (last_state in (0, 1, 2, 3)):
+                return
+            time.sleep(0.12)
+        raise RuntimeError(f"xArm not ready: state={last_state}, err={last_err}. Please clear controller error first.")
 
     def reset_to_home_on_start(self):
-        self.arm.set_mode(0)
-        self.arm.set_state(0)
-        self.arm.set_servo_angle(angle=RESET_HOME_JOINTS_DEG, speed=30, mvacc=200, wait=True, is_radian=False)
-        self.arm.set_gripper_position(830.0, wait=False, speed=self.gripper_speed, auto_enable=True)
-        deadline = time.monotonic() + 8.0
-        while time.monotonic() < deadline:
-            st = self.arm.get_state()
-            if st and st[0] == 0 and len(st) > 1 and int(st[1]) in (0, 1):
-                return
-            time.sleep(0.05)
+        try:
+            self.arm.clean_warn()
+            self.arm.clean_error()
+            self.arm.motion_enable(True)
+            self.arm.set_mode(0)
+            self.arm.set_state(0)
+            self.arm.set_servo_angle(
+                angle=list(RESET_HOME_JOINTS_DEG),
+                speed=20,
+                mvacc=200,
+                is_radian=False,
+                wait=True,
+            )
+            self.arm.set_gripper_position(
+                pos=830.0,
+                wait=False,
+                speed=self.gripper_speed,
+                auto_enable=True,
+            )
+            deadline = time.monotonic() + 4.0
+            while time.monotonic() < deadline:
+                st = self.arm.get_state()
+                if st and st[0] == 0 and len(st) > 1 and int(st[1]) in (0, 1):
+                    break
+                time.sleep(0.05)
+        except Exception:
+            pass
 
     def stop_motion_now(self):
         try:
@@ -275,27 +305,59 @@ class TeleopLocal:
     def enter_realtime_velocity_mode(self):
         for _ in range(3):
             try:
-                self.arm.set_mode(5)
                 self.arm.set_state(0)
+                time.sleep(0.05)
+                self.arm.set_mode(5)
                 time.sleep(0.08)
-                self.arm.vc_set_cartesian_velocity([0.0] * 6, is_radian=False, is_tool_coord=True, duration=0, check_mode=False)
-                self.velocity_mode_ready = True
-                return True
+                self.arm.set_state(0)
+                time.sleep(0.05)
+                self.arm.set_cartesian_velo_continuous(True)
+                self.arm.vc_set_cartesian_velocity(
+                    [0.0] * 6,
+                    is_radian=False,
+                    is_tool_coord=True,
+                    duration=0,
+                    check_mode=False,
+                )
+                mode = int(getattr(self.arm, "mode", -1))
+                state = int(getattr(self.arm, "state", -1))
+                if mode == 5 and state in (0, 1, 2):
+                    self.velocity_mode_ready = True
+                    return True
             except Exception:
                 time.sleep(0.1)
         self.velocity_mode_ready = False
         return False
 
     def ensure_velocity_runtime_ready(self):
-        if self.velocity_mode_ready and getattr(self.arm, "mode", None) == 5 and getattr(self.arm, "state", None) in (1, 2):
+        mode = int(getattr(self.arm, "mode", -1))
+        state = int(getattr(self.arm, "state", -1))
+        if mode == 5 and state in (0, 1, 2):
             return True
+        try:
+            if mode == 5 and state in (2, 3):
+                self.arm.set_state(0)
+                time.sleep(0.03)
+                mode = int(getattr(self.arm, "mode", -1))
+                state = int(getattr(self.arm, "state", -1))
+                if mode == 5 and state in (0, 1, 2):
+                    self.velocity_mode_ready = True
+                    return True
+        except Exception:
+            pass
         return self.enter_realtime_velocity_mode()
 
     def go_home_now(self):
         self.stop_motion_now()
         self.arm.set_mode(0)
         self.arm.set_state(0)
-        self.arm.set_servo_angle(angle=RESET_HOME_JOINTS_DEG, speed=30, mvacc=200, wait=True, is_radian=False)
+        self.arm.set_servo_angle(
+            angle=list(RESET_HOME_JOINTS_DEG),
+            speed=20,
+            mvacc=200,
+            wait=True,
+            is_radian=False,
+        )
         self.enter_realtime_velocity_mode()
 
     def open_camera_with_probe(self, camera_id, camera_dev):
@@ -354,25 +416,56 @@ class TeleopLocal:
     def start_input(self):
         from pynput import keyboard, mouse
 
+        self.mouse_ctl = mouse.Controller()
         self.Key = keyboard.Key
         self.Button = mouse.Button
-        self.screen_center = self.get_screen_center_x11()
-        if self.fps_mouse and self.screen_center is not None:
-            print(f"[INFO] FPS mouse center enabled at {self.screen_center}")
-            try:
-                self.mouse_ctl = mouse.Controller()
-                self.center_thread = threading.Thread(target=self.center_loop, daemon=True)
-                self.center_thread.start()
-            except Exception:
-                self.mouse_ctl = None
         self.kb_listener = keyboard.Listener(on_press=self.on_key_press, on_release=self.on_key_release)
         self.mouse_listener = mouse.Listener(on_move=self.on_mouse_move, on_click=self.on_mouse_click)
         self.kb_listener.start()
         self.mouse_listener.start()
+        self.setup_fps_mouse()
+        if self.show_video:
+            self.camera = self.open_camera_with_probe(self.camera_id, self.camera_dev)
+            if self.camera is None:
+                print("[WARN] no camera frame available, disable video panel")
+                if self.strict_camera_dev:
+                    raise RuntimeError(f"strict camera mode: cannot open {self.camera_dev}")
+
+    def setup_fps_mouse(self):
+        if not self.fps_mouse:
+            return
         try:
-            self.unclutter_proc = subprocess.Popen(["unclutter", "-idle", "0.01", "-root"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            import tkinter as tk
+
+            root = tk.Tk()
+            root.withdraw()
+            w = int(root.winfo_screenwidth())
+            h = int(root.winfo_screenheight())
+            root.destroy()
+            self.screen_center = (max(1, w // 2), max(1, h // 2))
         except Exception:
-            self.unclutter_proc = None
+            self.screen_center = self.get_screen_center_x11()
+        if self.screen_center is not None and self.mouse_ctl is not None:
+            try:
+                self.mouse_ctl.position = self.screen_center
+            except Exception:
+                pass
+        self.use_xdotool_center = shutil.which("xdotool") is not None
+        if shutil.which("unclutter"):
+            try:
+                self.unclutter_proc = subprocess.Popen(
+                    ["unclutter", "-idle", "0", "-root"],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+            except Exception:
+                self.unclutter_proc = None
+        if self.screen_center is not None:
+            print(f"[INFO] FPS mouse center enabled at {self.screen_center}")
+            self.center_thread = threading.Thread(target=self.center_loop, daemon=True)
+            self.center_thread.start()
+        else:
+            print("[WARN] FPS mouse center disabled: screen center not detected")
 
     def center_loop(self):
         while self.running:

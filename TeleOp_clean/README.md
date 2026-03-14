@@ -2,9 +2,9 @@
 
 `TeleOp_clean` is the minimal local-only teleoperation bundle for this host.
 
-It keeps only the files needed to run keyboard and mouse teleop directly on the
-same machine that can reach the robot and camera. SSH tunnel launchers, 4060
-integration, runtime monitors, and legacy sources are intentionally excluded.
+It keeps only the files needed to run keyboard and mouse teleop on the same
+machine as the operator. SSH tunnel launchers, 4060 integration, runtime
+monitors, and legacy sources are intentionally excluded.
 
 ## Layout
 
@@ -36,6 +36,9 @@ Common overrides:
 - report ports: `30001`, `30002`, `30003`
 - camera: `/dev/video4`, fallback enabled
 - episode output: `TeleOp_clean/data`
+
+If local forwarded xArm ports already exist on `127.0.0.1:1502/13001/13002/13003`,
+the launcher reuses them automatically. It does not create SSH tunnels itself.
 
 ## Verify
 
