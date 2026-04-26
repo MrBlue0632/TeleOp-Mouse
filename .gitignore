@@ -1,6 +1,7 @@
 __pycache__/
 *.pyc
-
+*.egg-info/
 data/
 logs/
-TeleOp_clean/data/
+*.mp4
+.pytest_cache/
