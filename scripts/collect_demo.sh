@@ -34,7 +34,7 @@ if [ -d "${HOME}/lerobot/src" ]; then
 fi
 
 # ---------- 依赖检查 ----------
-python3 - <<PY
+python3 - <<'PY'
 import importlib, sys
 required = ["pynput", "xarm", "numpy", "cv2", "lerobot"]
 missing = []
@@ -44,7 +44,7 @@ for m in required:
     except ImportError:
         missing.append(m)
 if missing:
-    print(f"[ERROR] missing packages: {, .join(missing)}", file=sys.stderr)
+    print(f"[ERROR] missing packages: {', '.join(missing)}", file=sys.stderr)
     sys.exit(1)
 print("[OK] all dependencies available")
 PY
@@ -57,6 +57,20 @@ if [ -n "${OLD_PIDS}" ]; then
     sleep 0.5
 fi
 
+# ---------- 解析参数（在端口检测前，以便 --task 等生效） ----------
+EXTRA_ARGS=()
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --task)       TASK="$2"; shift 2 ;;
+        --repo-id)    REPO_ID="$2"; shift 2 ;;
+        --data-dir)   DATA_DIR="$2"; shift 2 ;;
+        --rate-hz)    RATE_HZ="$2"; shift 2 ;;
+        --vcodec)     VCODEC="$2"; shift 2 ;;
+        --camera-id)  CAMERA_ID="$2"; shift 2 ;;
+        *)            EXTRA_ARGS+=("$1"); shift ;;
+    esac
+done
+
 # ---------- 端口转发检测 ----------
 ROBOT_PORT=502
 REPORT_NORM=30001
@@ -67,7 +81,7 @@ if python3 -c "
 import socket
 for p in (1502, 13001, 13002, 13003):
     s = socket.socket(); s.settimeout(0.3)
-    try: s.connect((127.0.0.1, p))
+    try: s.connect(('127.0.0.1', p))
     except: exit(1)
     finally: s.close()
 " 2>/dev/null; then
@@ -108,20 +122,6 @@ echo "    Enter             — save episode"
 echo "    ESC / Ctrl+C      — exit"
 echo "============================================"
 echo ""
-
-# ---------- 解析额外参数 ----------
-EXTRA_ARGS=()
-while [[ $# -gt 0 ]]; do
-    case "$1" in
-        --task)       TASK="$2"; shift 2 ;;
-        --repo-id)    REPO_ID="$2"; shift 2 ;;
-        --data-dir)   DATA_DIR="$2"; shift 2 ;;
-        --rate-hz)    RATE_HZ="$2"; shift 2 ;;
-        --vcodec)     VCODEC="$2"; shift 2 ;;
-        --camera-id)  CAMERA_ID="$2"; shift 2 ;;
-        *)            EXTRA_ARGS+=("$1"); shift ;;
-    esac
-done
 
 # ---------- 启动遥操作 ----------
 exec python3 "${SCRIPT_PATH}" \
