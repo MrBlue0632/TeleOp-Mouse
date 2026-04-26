@@ -236,7 +236,7 @@ class TkVideoWindow:
 
 
 class TeleopApp:
-    def __init__(self, robot_ip, rate_hz, control_hz, data_dir, camera_id, camera_dev, base_camera_id, base_camera_dev, strict_camera_dev, show_video, fps_mouse, sdk_timeout_s, video_hz, repo_id, task, vcodec, encoder_threads, encoder_queue_maxsize):
+    def __init__(self, robot_ip, rate_hz, control_hz, data_dir, camera_id, camera_dev, base_camera_id, base_camera_dev, target_camera_id, target_camera_dev, display_camera, strict_camera_dev, show_video, fps_mouse, sdk_timeout_s, video_hz, repo_id, task, vcodec, encoder_threads, encoder_queue_maxsize):
         self.robot_ip = robot_ip
         self.rate_hz = rate_hz
         self.control_hz = float(control_hz)
@@ -245,6 +245,9 @@ class TeleopApp:
         self.camera_dev = camera_dev
         self.base_camera_id = base_camera_id
         self.base_camera_dev = base_camera_dev
+        self.target_camera_id = target_camera_id
+        self.target_camera_dev = target_camera_dev
+        self.display_camera = display_camera
         self.strict_camera_dev = strict_camera_dev
         self.show_video = show_video
         self.fps_mouse = fps_mouse
@@ -324,6 +327,8 @@ class TeleopApp:
         self.camera_source = None
         self.base_camera = None
         self.base_camera_source = None
+        self.target_camera = None
+        self.target_camera_source = None
         self.last_camera_retry_ts = 0.0
         self.filtered_curr = np.full((7,), np.nan, dtype=np.float64)
         self.curr_valid = np.zeros((7,), dtype=bool)
@@ -390,6 +395,11 @@ class TeleopApp:
                 "names": ["height", "width", "channels"],
             },
             "observation.images.base": {
+                "dtype": "video",
+                "shape": (480, 640, 3),
+                "names": ["height", "width", "channels"],
+            },
+            "observation.images.target": {
                 "dtype": "video",
                 "shape": (480, 640, 3),
                 "names": ["height", "width", "channels"],
@@ -605,6 +615,9 @@ class TeleopApp:
         self.base_camera = self.open_camera_with_probe(self.base_camera_id, self.base_camera_dev, allow_fallback=False, role="base")
         if self.base_camera is None:
             print(f"[WARN] no base camera frame available")
+        self.target_camera = self.open_camera_with_probe(self.target_camera_id, self.target_camera_dev, allow_fallback=False, role="target")
+        if self.target_camera is None:
+            print(f"[WARN] no target camera frame available")
 
     def iter_camera_sources(self, preferred_cam_id, preferred_cam_dev, allow_fallback=True):
         sources = []
@@ -679,6 +692,7 @@ class TeleopApp:
 
         wrist_frame = self._get_camera_frame_rgb(self.camera)
         base_frame = self._get_camera_frame_rgb(self.base_camera)
+        target_frame = self._get_camera_frame_rgb(self.target_camera)
 
         pose = [float(x) for x in state.get("pose_xyzrpy_deg", [0.0] * 6)]
         filtered = state.get("currents_filtered", [0.0] * 7)
@@ -689,6 +703,7 @@ class TeleopApp:
             "action": action,
             "observation.images.wrist": wrist_frame,
             "observation.images.base": base_frame,
+            "observation.images.target": target_frame,
             "observation.joints_deg": np.array(joints, dtype=np.float32),
             "observation.pose_xyzrpy_deg": np.array(pose, dtype=np.float32),
             "observation.currents": np.array(currents, dtype=np.float32),
@@ -826,23 +841,41 @@ class TeleopApp:
         check_color = (70, 220, 110) if self.current_alignment_ok else (60, 120, 255)
         cv2.putText(panel, check_txt, (14, h - 14), cv2.FONT_HERSHEY_SIMPLEX, 0.58, check_color, 1)
 
+    def _get_display_camera(self):
+        """Return the camera stream used for the video display panel."""
+        cam_map = {"wrist": self.camera, "base": self.base_camera, "target": self.target_camera}
+        return cam_map.get(self.display_camera, self.camera)
+
+    def _reopen_display_camera(self):
+        """Reopen the display camera after a stall and update the correct attribute."""
+        if self.display_camera == "base":
+            self.base_camera = self.open_camera_with_probe(self.base_camera_id, self.base_camera_dev)
+            return self.base_camera
+        elif self.display_camera == "target":
+            self.target_camera = self.open_camera_with_probe(self.target_camera_id, self.target_camera_dev)
+            return self.target_camera
+        else:
+            self.camera = self.open_camera_with_probe(self.camera_id, self.camera_dev)
+            return self.camera
+
     def show_video_panel(self):
-        if self.camera is None:
+        disp_cam = self._get_display_camera()
+        if disp_cam is None:
             return
         t0 = time.monotonic()
-        frm, ts, cnt = self.camera.get()
+        frm, ts, cnt = disp_cam.get()
         if frm is None or cnt < 1 or (time.monotonic() - ts) > 1.0:
             now = time.monotonic()
             if (now - self.last_camera_retry_ts) >= 1.5:
                 self.last_camera_retry_ts = now
-                print("[WARN] camera frame stalled, reopening source")
+                print(f"[WARN] display camera ({self.display_camera}) stalled, reopening")
                 try:
-                    self.camera.close()
+                    disp_cam.close()
                 except Exception:
                     pass
-                self.camera = self.open_camera_with_probe(self.camera_id, self.camera_dev)
-                if self.camera is not None:
-                    frm, ts, cnt = self.camera.get()
+                disp_cam = self._reopen_display_camera()
+                if disp_cam is not None:
+                    frm, ts, cnt = disp_cam.get()
             if frm is None or cnt < 1 or (time.monotonic() - ts) > 1.0:
                 frm = np.zeros((480, 640, 3), dtype=np.uint8)
             else:
@@ -1225,17 +1258,14 @@ class TeleopApp:
 
     def run(self):
         self.start_input()
-        video_src = self.camera_source if self.camera_source is not None else (
-            self.camera_dev if self.camera_dev else self.camera_id
-        )
         print(
             f"[RUN] teleop started: WASD/Shift/Space, mouse move, left click(toggle gripper), "
-            f"R, Enter. wrist={video_src} base={self.base_camera_dev or self.base_camera_id} "
-            f"dataset={self.lerobot_dataset.root}"
+            f"R, Enter. wrist={self.camera_dev} base={self.base_camera_dev} target={self.target_camera_dev} "
+            f"display={self.display_camera} dataset={self.lerobot_dataset.root}"
         )
         self.control_thread = threading.Thread(target=self.control_loop, daemon=True)
         self.control_thread.start()
-        if self.show_video and self.camera is not None:
+        if self.show_video and self._get_display_camera() is not None:
             self.video_thread = threading.Thread(target=self.video_loop, daemon=True)
             self.video_thread.start()
 
@@ -1289,6 +1319,8 @@ class TeleopApp:
             self.camera.close()
         if self.base_camera is not None:
             self.base_camera.close()
+        if self.target_camera is not None:
+            self.target_camera.close()
         self.arm.disconnect()
 
 
@@ -1315,10 +1347,13 @@ def main():
     parser.add_argument("--rate-hz", type=float, default=30.0)
     parser.add_argument("--control-hz", type=float, default=120.0)
     parser.add_argument("--data-dir", default=os.path.expanduser("~/下载"))
-    parser.add_argument("--camera-id", type=int, default=0)
-    parser.add_argument("--camera-dev", default="/dev/video0")
-    parser.add_argument("--base-camera-id", type=int, default=6)
-    parser.add_argument("--base-camera-dev", default="/dev/video6")
+    parser.add_argument("--camera-id", type=int, default=10, help="Wrist camera index")
+    parser.add_argument("--camera-dev", default="/dev/video10", help="Wrist camera device")
+    parser.add_argument("--base-camera-id", type=int, default=16, help="Base camera index")
+    parser.add_argument("--base-camera-dev", default="/dev/video16", help="Base camera device")
+    parser.add_argument("--target-camera-id", type=int, default=4, help="Target camera index")
+    parser.add_argument("--target-camera-dev", default="/dev/video4", help="Target camera device")
+    parser.add_argument("--display-camera", default="wrist", choices=["wrist", "base", "target"], help="Which camera to show in video panel")
     parser.add_argument("--allow-camera-fallback", action="store_true")
     parser.add_argument("--no-video", action="store_true")
     parser.add_argument("--no-fps-mouse", action="store_true")
@@ -1350,6 +1385,9 @@ def main():
         args.camera_dev,
         args.base_camera_id,
         args.base_camera_dev,
+        args.target_camera_id,
+        args.target_camera_dev,
+        args.display_camera,
         (not args.allow_camera_fallback),
         (not args.no_video),
         (not args.no_fps_mouse),

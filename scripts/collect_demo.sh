@@ -8,6 +8,7 @@ set -euo pipefail
 #    ./scripts/collect_demo.sh                          # 默认参数
 #    ./scripts/collect_demo.sh --task "pick_red_cube"    # 自定义任务描述
 #    ./scripts/collect_demo.sh --no-video                # 不显示视频窗口
+#    ./scripts/collect_demo.sh --display-camera target   # 显示 target 相机
 # ============================================================
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -20,7 +21,19 @@ REPO_ID="${REPO_ID:-teleop/xarm_demo}"
 TASK="${TASK:-keyboard_mouse_teleop}"
 RATE_HZ="${RATE_HZ:-30}"
 VCODEC="${VCODEC:-libsvtav1}"
-CAMERA_ID="${CAMERA_ID:-1}"
+
+# ---------- 相机配置 ----------
+# wrist: 腕部相机 (默认 /dev/video10)
+WRIST_CAM_ID="${WRIST_CAM_ID:-10}"
+WRIST_CAM_DEV="${WRIST_CAM_DEV:-/dev/video10}"
+# base: 底部相机 (默认 /dev/video16)
+BASE_CAM_ID="${BASE_CAM_ID:-16}"
+BASE_CAM_DEV="${BASE_CAM_DEV:-/dev/video16}"
+# target: 目标相机 (默认 /dev/video4)
+TARGET_CAM_ID="${TARGET_CAM_ID:-4}"
+TARGET_CAM_DEV="${TARGET_CAM_DEV:-/dev/video4}"
+# 采集时显示哪个相机 (wrist/base/target)
+DISPLAY_CAMERA="${DISPLAY_CAMERA:-wrist}"
 
 # ---------- conda 环境 ----------
 if [ -f "${HOME}/anaconda3/etc/profile.d/conda.sh" ]; then
@@ -57,17 +70,20 @@ if [ -n "${OLD_PIDS}" ]; then
     sleep 0.5
 fi
 
-# ---------- 解析参数（在端口检测前，以便 --task 等生效） ----------
+# ---------- 解析参数 ----------
 EXTRA_ARGS=()
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --task)       TASK="$2"; shift 2 ;;
-        --repo-id)    REPO_ID="$2"; shift 2 ;;
-        --data-dir)   DATA_DIR="$2"; shift 2 ;;
-        --rate-hz)    RATE_HZ="$2"; shift 2 ;;
-        --vcodec)     VCODEC="$2"; shift 2 ;;
-        --camera-id)  CAMERA_ID="$2"; shift 2 ;;
-        *)            EXTRA_ARGS+=("$1"); shift ;;
+        --task)            TASK="$2"; shift 2 ;;
+        --repo-id)         REPO_ID="$2"; shift 2 ;;
+        --data-dir)        DATA_DIR="$2"; shift 2 ;;
+        --rate-hz)         RATE_HZ="$2"; shift 2 ;;
+        --vcodec)          VCODEC="$2"; shift 2 ;;
+        --wrist-cam-dev)   WRIST_CAM_DEV="$2"; shift 2 ;;
+        --base-cam-dev)    BASE_CAM_DEV="$2"; shift 2 ;;
+        --target-cam-dev)  TARGET_CAM_DEV="$2"; shift 2 ;;
+        --display-camera)  DISPLAY_CAMERA="$2"; shift 2 ;;
+        *)                 EXTRA_ARGS+=("$1"); shift ;;
     esac
 done
 
@@ -102,13 +118,17 @@ mkdir -p "${DATA_DIR}"
 echo "============================================"
 echo "  Demo Data Collection"
 echo "============================================"
-echo "  Robot IP  : ${ROBOT_IP}:${ROBOT_PORT}"
-echo "  Data Dir  : ${DATA_DIR}"
-echo "  Repo ID   : ${REPO_ID}"
-echo "  Task      : ${TASK}"
-echo "  FPS       : ${RATE_HZ}"
-echo "  Codec     : ${VCODEC}"
-echo "  Camera    : ${CAMERA_ID}"
+echo "  Robot IP      : ${ROBOT_IP}:${ROBOT_PORT}"
+echo "  Data Dir      : ${DATA_DIR}"
+echo "  Repo ID       : ${REPO_ID}"
+echo "  Task          : ${TASK}"
+echo "  FPS           : ${RATE_HZ}"
+echo "  Codec         : ${VCODEC}"
+echo "  ---"
+echo "  Wrist Camera  : ${WRIST_CAM_DEV}"
+echo "  Base Camera   : ${BASE_CAM_DEV}"
+echo "  Target Camera : ${TARGET_CAM_DEV}"
+echo "  Display       : ${DISPLAY_CAMERA}"
 echo "============================================"
 echo ""
 echo "  Controls:"
@@ -132,7 +152,10 @@ exec python3 "${SCRIPT_PATH}" \
     --report-port-real "${REPORT_REAL}" \
     --rate-hz "${RATE_HZ}" \
     --control-hz 120 \
-    --camera-id "${CAMERA_ID}" \
+    --camera-dev "${WRIST_CAM_DEV}" \
+    --base-camera-dev "${BASE_CAM_DEV}" \
+    --target-camera-dev "${TARGET_CAM_DEV}" \
+    --display-camera "${DISPLAY_CAMERA}" \
     --allow-camera-fallback \
     --data-dir "${DATA_DIR}" \
     --repo-id "${REPO_ID}" \
