@@ -23,17 +23,16 @@ RATE_HZ="${RATE_HZ:-30}"
 VCODEC="${VCODEC:-libsvtav1}"
 
 # ---------- 相机配置 ----------
-# wrist: 腕部相机 (默认 /dev/video10)
 WRIST_CAM_ID="${WRIST_CAM_ID:-10}"
 WRIST_CAM_DEV="${WRIST_CAM_DEV:-/dev/video10}"
-# base: 底部相机 (默认 /dev/video16)
 BASE_CAM_ID="${BASE_CAM_ID:-16}"
 BASE_CAM_DEV="${BASE_CAM_DEV:-/dev/video16}"
-# target: 目标相机 (默认 /dev/video4)
 TARGET_CAM_ID="${TARGET_CAM_ID:-4}"
 TARGET_CAM_DEV="${TARGET_CAM_DEV:-/dev/video4}"
-# 采集时显示哪个相机 (wrist/base/target)
 DISPLAY_CAMERA="${DISPLAY_CAMERA:-wrist}"
+
+# ---------- X display (needed for pynput via SSH) ----------
+export DISPLAY="${DISPLAY:-:0}"
 
 # ---------- conda 环境 ----------
 if [ -f "${HOME}/anaconda3/etc/profile.d/conda.sh" ]; then
@@ -47,7 +46,7 @@ if [ -d "${HOME}/lerobot/src" ]; then
 fi
 
 # ---------- 依赖检查 ----------
-python3 - <<'PY'
+python3 - <<'PY' || exit 1
 import importlib, sys
 required = ["pynput", "xarm", "numpy", "cv2", "lerobot"]
 missing = []
