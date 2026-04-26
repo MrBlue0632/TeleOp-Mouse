@@ -288,7 +288,6 @@ class TeleopApp:
         self.end_episode_requested = False
 
         self.lerobot_dataset = None
-        self.lerobot_feature_keys = set()
         self.pose_dirty = False
 
         self.Key = None
@@ -441,13 +440,6 @@ class TeleopApp:
                 encoder_threads=self.encoder_threads,
                 vcodec=self.vcodec,
             )
-            self.lerobot_feature_keys = set(self.lerobot_dataset.features.keys())
-            missing_features = sorted(set(features.keys()) - self.lerobot_feature_keys)
-            if missing_features:
-                print(
-                    "[WARN] existing dataset schema is missing current script features; "
-                    f"not recording them this run: {missing_features}"
-                )
         else:
             print(f"[INFO] creating new LeRobot dataset at {root}")
             self.lerobot_dataset = LeRobotDataset.create(
@@ -462,7 +454,6 @@ class TeleopApp:
                 encoder_threads=self.encoder_threads,
                 vcodec=self.vcodec,
             )
-            self.lerobot_feature_keys = set(features.keys())
         print(f"[INFO] LeRobot dataset ready: {self.lerobot_dataset.num_episodes} episodes, "
               f"{self.lerobot_dataset.meta.total_frames} frames")
 
@@ -662,19 +653,15 @@ class TeleopApp:
             if ok:
                 if role == "wrist":
                     self.camera_source = src
-                elif role == "base":
-                    self.base_camera_source = src
                 else:
-                    self.target_camera_source = src
+                    self.base_camera_source = src
                 if isinstance(src, str):
                     print(f"[INFO] {role} camera source {src} ready")
                 else:
                     if role == "wrist":
                         self.camera_id = int(src)
-                    elif role == "base":
-                        self.base_camera_id = int(src)
                     else:
-                        self.target_camera_id = int(src)
+                        self.base_camera_id = int(src)
                     print(f"[INFO] {role} camera index {src} ready")
                 return stream
             stream.close()
@@ -705,6 +692,7 @@ class TeleopApp:
 
         wrist_frame = self._get_camera_frame_rgb(self.camera)
         base_frame = self._get_camera_frame_rgb(self.base_camera)
+        target_frame = self._get_camera_frame_rgb(self.target_camera)
 
         pose = [float(x) for x in state.get("pose_xyzrpy_deg", [0.0] * 6)]
         filtered = state.get("currents_filtered", [0.0] * 7)
@@ -715,14 +703,13 @@ class TeleopApp:
             "action": action,
             "observation.images.wrist": wrist_frame,
             "observation.images.base": base_frame,
+            "observation.images.target": target_frame,
             "observation.joints_deg": np.array(joints, dtype=np.float32),
             "observation.pose_xyzrpy_deg": np.array(pose, dtype=np.float32),
             "observation.currents": np.array(currents, dtype=np.float32),
             "observation.currents_filtered": np.array(currents_filtered, dtype=np.float32),
             "task": self.task_description,
         }
-        if "observation.images.target" in self.lerobot_feature_keys:
-            frame_dict["observation.images.target"] = self._get_camera_frame_rgb(self.target_camera)
         self.lerobot_dataset.add_frame(frame_dict)
         return state
 
@@ -981,7 +968,7 @@ class TeleopApp:
             if button == self.Button.left:
                 # left click toggles close/open
                 self.gripper_toggle_closed = (not self.gripper_toggle_closed)
-                self.pending_gripper_pos = 300.0 if self.gripper_toggle_closed else 830.0
+                self.pending_gripper_pos = 250.0 if self.gripper_toggle_closed else 830.0
 
     def consume_events(self):
         with self.lock:
