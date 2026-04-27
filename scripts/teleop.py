@@ -18,6 +18,7 @@ import numpy as np
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
 from xarm.core.config.x_config import XCONF
 from xarm.wrapper import XArmAPI
+from xarm6_dynamics import XArm6Dynamics
 
 
 def clip(v, lo, hi):
@@ -35,6 +36,55 @@ def rpy_deg_to_rotmat(roll_deg, pitch_deg, yaw_deg):
     rym = np.array([[cy, 0.0, sy], [0.0, 1.0, 0.0], [-sy, 0.0, cy]], dtype=np.float64)
     rzm = np.array([[cz, -sz, 0.0], [sz, cz, 0.0], [0.0, 0.0, 1.0]], dtype=np.float64)
     return rzm @ rym @ rxm
+
+
+# ── xArm6 Modified DH parameters (mm, rad) ──────────────────────────────────
+XARM6_MDH = np.array([
+    [0.0,       0.0,   267.6, 0.0],
+    [-np.pi/2,  0.0,     0.0, 0.0],
+    [0.0,     289.6,     0.0, 0.0],
+    [-np.pi/2, 77.8,   227.6, 0.0],
+    [np.pi/2,   0.0,     0.0, 0.0],
+    [-np.pi/2,  0.0,    61.5, 0.0],
+], dtype=np.float64)
+
+
+def mdh_transform(alpha, a, d, theta):
+    ct, st = np.cos(theta), np.sin(theta)
+    ca, sa = np.cos(alpha), np.sin(alpha)
+    return np.array([
+        [ct,      -st,      0.0,   a],
+        [st*ca,    ct*ca,  -sa,   -d*sa],
+        [st*sa,    ct*sa,   ca,    d*ca],
+        [0.0,      0.0,     0.0,   1.0],
+    ], dtype=np.float64)
+
+
+def compute_jacobian(q_rad):
+    """Geometric Jacobian (6x6). Linear part in mm/rad, angular in rad/rad."""
+    n = len(q_rad)
+    T = np.eye(4)
+    Ts = []
+    for i in range(n):
+        alpha, a, d, off = XARM6_MDH[i]
+        T = T @ mdh_transform(alpha, a, d, q_rad[i] + off)
+        Ts.append(T.copy())
+    p_ee = Ts[-1][:3, 3]
+    J = np.zeros((6, n))
+    for i in range(n):
+        z_i = np.array([0, 0, 1.0]) if i == 0 else Ts[i-1][:3, 2]
+        p_i = np.zeros(3)            if i == 0 else Ts[i-1][:3, 3]
+        J[:3, i] = np.cross(z_i, p_ee - p_i)
+        J[3:, i] = z_i
+    return J
+
+
+def estimate_wrench(tau_ext, J, reg=0.01):
+    """Solve for end-effector wrench from external joint torques via Jacobian."""
+    J_si = J.copy()
+    J_si[:3, :] /= 1000.0  # mm -> m
+    A = J_si @ J_si.T + reg * np.eye(6)
+    return np.linalg.solve(A, J_si @ tau_ext)
 
 
 RESET_HOME_JOINTS_DEG = [14.1, -8.0, -24.7, 196.9, 62.3, -8.8]
@@ -236,7 +286,7 @@ class TkVideoWindow:
 
 
 class TeleopApp:
-    def __init__(self, robot_ip, rate_hz, control_hz, data_dir, camera_id, camera_dev, base_camera_id, base_camera_dev, target_camera_id, target_camera_dev, display_camera, strict_camera_dev, show_video, fps_mouse, sdk_timeout_s, video_hz, repo_id, task, vcodec, encoder_threads, encoder_queue_maxsize):
+    def __init__(self, robot_ip, rate_hz, control_hz, data_dir, camera_id, camera_dev, base_camera_id, base_camera_dev, target_camera_id, target_camera_dev, display_camera, strict_camera_dev, show_video, fps_mouse, sdk_timeout_s, video_hz, repo_id, task, vcodec, encoder_threads, encoder_queue_maxsize, tool_mass=0.82, tool_com_z=0.06):
         self.robot_ip = robot_ip
         self.rate_hz = rate_hz
         self.control_hz = float(control_hz)
@@ -290,6 +340,18 @@ class TeleopApp:
 
         self.lerobot_dataset = None
         self.pose_dirty = False
+        self.tau_gravity = None  # legacy static calibration (fallback)
+        self.ee_force = np.zeros(6, dtype=np.float64)  # [Fx,Fy,Fz,Tx,Ty,Tz]
+        self.ee_force_ema = 0.1  # EMA filter coefficient
+        self.dynamics = XArm6Dynamics(tool_mass=tool_mass, tool_com=[0.0, 0.0, tool_com_z])
+        self.tau_bias = None  # residual bias after dynamics model
+        # Numerical differentiation state for q_dot, q_ddot
+        self._q_prev = None       # previous joint angles (rad)
+        self._qd_prev = None      # previous joint velocity (rad/s)
+        self._t_prev = None       # previous timestamp (s)
+        self._qd_filt = np.zeros(6, dtype=np.float64)  # EMA-filtered velocity
+        self._qdd_filt = np.zeros(6, dtype=np.float64)  # EMA-filtered acceleration
+        self._dyn_ema = 0.3       # EMA coefficient for velocity/acceleration
 
         self.Key = None
         self.Button = None
@@ -350,9 +412,11 @@ class TeleopApp:
         self.arm.set_timeout(self.sdk_timeout_s)
         self.ensure_robot_ready()
         self.arm.set_gripper_enable(True)
+        self.arm.set_report_tau_or_i(tau_or_i=0)  # report joint torques instead of currents
         self.arm.set_mode(0)
         self.arm.set_state(0)
         self.reset_to_home_on_start()
+        self.calibrate_gravity_torques()
         self.enter_realtime_velocity_mode()
 
         pret = self.arm.get_position(is_radian=False)
@@ -367,7 +431,8 @@ class TeleopApp:
             "joints_deg": [0.0] * 6,
             "pose_xyzrpy_deg": list(self.target_pose),
             "gripper_pos": float(self.gripper_pos),
-            "currents": [0.0] * 7,
+            "torques": [0.0] * 7,
+            "ee_force": [0.0] * 6,
         }
         self.last_state_ts = 0.0
         self.last_robot_state = None
@@ -382,8 +447,8 @@ class TeleopApp:
                 "shape": (14,),
                 "names": ["J1", "J2", "J3", "J4", "J5", "J6",
                           "gripper_pos",
-                          "curr_J1", "curr_J2", "curr_J3", "curr_J4",
-                          "curr_J5", "curr_J6", "curr_gripper"],
+                          "torque_J1", "torque_J2", "torque_J3", "torque_J4",
+                          "torque_J5", "torque_J6", "torque_gripper"],
             },
             "action": {
                 "dtype": "float32",
@@ -415,15 +480,20 @@ class TeleopApp:
                 "shape": (6,),
                 "names": ["x", "y", "z", "roll", "pitch", "yaw"],
             },
-            "observation.currents": {
+            "observation.torques": {
                 "dtype": "float32",
                 "shape": (7,),
                 "names": ["J1", "J2", "J3", "J4", "J5", "J6", "gripper"],
             },
-            "observation.currents_filtered": {
+            "observation.torques_filtered": {
                 "dtype": "float32",
                 "shape": (7,),
                 "names": ["J1", "J2", "J3", "J4", "J5", "J6", "gripper"],
+            },
+            "observation.ee_force": {
+                "dtype": "float32",
+                "shape": (6,),
+                "names": ["Fx", "Fy", "Fz", "Tx", "Ty", "Tz"],
             },
         }
 
@@ -457,6 +527,38 @@ class TeleopApp:
             )
         print(f"[INFO] LeRobot dataset ready: {self.lerobot_dataset.num_episodes} episodes, "
               f"{self.lerobot_dataset.meta.total_frames} frames")
+
+    def calibrate_gravity_torques(self, duration_s=2.0, rate=20.0):
+        """Calibrate residual torque bias using dynamics model at home position."""
+        # Read current joint angles for model prediction
+        jret = self.arm.get_servo_angle(is_radian=True)
+        if jret and jret[0] == 0:
+            q_home = np.array(jret[1][:6], dtype=np.float64)
+        else:
+            q_home = np.deg2rad(RESET_HOME_JOINTS_DEG)
+        g_model_home = self.dynamics.gravity_torques(q_home)
+
+        # Collect measured torque samples
+        n = int(duration_s * rate)
+        print(f"[CALIB] Collecting {n} torque samples — keep robot still!")
+        samples = []
+        dt = 1.0 / rate
+        for _ in range(n):
+            code, tau = self.arm.get_joints_torque()
+            if code == 0 and tau:
+                samples.append(tau[:6])
+            time.sleep(dt)
+
+        if len(samples) < 5:
+            print("[WARN] Not enough samples, using model gravity without bias")
+            self.tau_bias = np.zeros(6)
+            return
+
+        tau_measured_home = np.median(samples, axis=0)
+        self.tau_bias = tau_measured_home - g_model_home
+        print(f"[CALIB] Model g(q):  [{', '.join(f'{v:+.2f}' for v in g_model_home)}] Nm")
+        print(f"[CALIB] Measured:    [{', '.join(f'{v:+.2f}' for v in tau_measured_home)}] Nm")
+        print(f"[CALIB] Bias (res.): [{', '.join(f'{v:+.2f}' for v in self.tau_bias)}] Nm")
 
     def ensure_robot_ready(self, timeout_s=6.0):
         deadline = time.monotonic() + timeout_s
@@ -684,8 +786,8 @@ class TeleopApp:
     def capture_episode_observation(self, state):
         joints = [float(x) for x in state.get("joints_deg", [0.0] * 6)]
         gripper = float(state.get("gripper_pos", 0.0))
-        currents = [float(x) for x in state.get("currents", [0.0] * 7)]
-        obs_state = np.array(joints + [gripper] + currents, dtype=np.float32)
+        torques = [float(x) for x in state.get("torques", [0.0] * 7)]
+        obs_state = np.array(joints + [gripper] + torques, dtype=np.float32)
 
         vel_cmd = [float(x) for x in state.get("action_velocity_cmd", [0.0] * 6)]
         grip_action = float(state.get("action_gripper", 0.0))
@@ -696,8 +798,8 @@ class TeleopApp:
         target_frame = self._get_camera_frame_rgb(self.target_camera)
 
         pose = [float(x) for x in state.get("pose_xyzrpy_deg", [0.0] * 6)]
-        filtered = state.get("currents_filtered", [0.0] * 7)
-        currents_filtered = [float(x) if x is not None else 0.0 for x in filtered]
+        filtered = state.get("torques_filtered", [0.0] * 7)
+        torques_filtered = [float(x) if x is not None else 0.0 for x in filtered]
 
         frame_dict = {
             "observation.state": obs_state,
@@ -707,8 +809,9 @@ class TeleopApp:
             "observation.images.target": target_frame,
             "observation.joints_deg": np.array(joints, dtype=np.float32),
             "observation.pose_xyzrpy_deg": np.array(pose, dtype=np.float32),
-            "observation.currents": np.array(currents, dtype=np.float32),
-            "observation.currents_filtered": np.array(currents_filtered, dtype=np.float32),
+            "observation.torques": np.array(torques, dtype=np.float32),
+            "observation.torques_filtered": np.array(torques_filtered, dtype=np.float32),
+            "observation.ee_force": np.array(state.get("ee_force", [0.0] * 6), dtype=np.float32),
             "task": self.task_description,
         }
         self.lerobot_dataset.add_frame(frame_dict)
@@ -823,15 +926,16 @@ class TeleopApp:
         row_h = (h - 48) // len(labels)
         bar_x = 200
         bar_w = w - bar_x - 16
-        cv2.putText(panel, "Currents (Filtered)", (12, 22), cv2.FONT_HERSHEY_SIMPLEX, 0.62, (210, 210, 220), 1)
+        raw_curr = self.last_state.get("torques", [0.0] * 7)
+        cv2.putText(panel, "Torques (Nm)", (12, 22), cv2.FONT_HERSHEY_SIMPLEX, 0.62, (210, 210, 220), 1)
         for i, lab in enumerate(labels):
             y = top + i * row_h
-            val = float(abs(self.filtered_curr[i])) if not np.isnan(self.filtered_curr[i]) else float("nan")
+            val = float(abs(raw_curr[i]))
             cv2.putText(panel, lab, (14, y + 20), cv2.FONT_HERSHEY_SIMPLEX, 0.66, (220, 220, 220), 1)
-            txt = "N/A" if np.isnan(val) else f"{val:.2f}A"
+            txt = f"{val:.2f}"
             cv2.putText(panel, txt, (120, y + 20), cv2.FONT_HERSHEY_SIMPLEX, 0.60, (235, 235, 235), 1)
             vmax = float(PANEL_GRIPPER_MAX if i == 6 else PANEL_JOINT_MAX[i])
-            ratio = 0.0 if np.isnan(val) else min(1.0, val / max(vmax, 1e-6))
+            ratio = min(1.0, val / max(vmax, 1e-6))
             fill = int(bar_w * ratio)
             cv2.rectangle(panel, (bar_x, y + 4), (bar_x + bar_w, y + 24), (70, 70, 78), -1)
             color = (50, 190, 255) if ratio < 0.75 else (60, 120, 255)
@@ -1123,41 +1227,56 @@ class TeleopApp:
             pose = [float(v) for v in pret[1][:6]]
             self.target_pose = list(pose)
             self.latest_rpy_deg = [pose[3], pose[4], pose[5]]
-        currents = list(self.arm.currents) if self.arm.currents is not None else self.last_state["currents"]
-        if len(currents) < 7:
-            currents = currents + [0.0] * (7 - len(currents))
-        currents = [float(c) for c in currents[:7]]
+        torques = list(self.arm.joints_torque) if self.arm.joints_torque is not None else self.last_state["torques"]
+        if len(torques) < 7:
+            torques = torques + [0.0] * (7 - len(torques))
+        torques = [float(t) for t in torques[:7]]
 
-        # Gripper current uses independent monitor-register path for calibration.
-        if (now - self.last_reg_read_ts) >= 0.25:
-            reg_amp = self.read_gripper_current_register_amp(register_addr=0x0003)
-            self.last_reg_read_ts = now
-            if np.isnan(reg_amp):
-                self.reg_gripper_fail_cnt += 1
-                if self.reg_gripper_fail_cnt >= 3:
-                    self.reg_gripper_ok = False
-            else:
-                self.reg_gripper_fail_cnt = 0
-                self.reg_gripper_ok = True
-                self.latest_reg_gripper_amp = reg_amp
-
-        if self.reg_gripper_ok and not np.isnan(self.latest_reg_gripper_amp):
-            currents[6] = float(self.latest_reg_gripper_amp)
-
-        raw_arr = np.array(currents, dtype=np.float64)
+        raw_arr = np.array(torques, dtype=np.float64)
         self.update_filtered_currents(raw_arr)
-        # Calibration check between terminal raw and panel filtered.
-        if not np.isnan(self.filtered_curr[6]) and not np.isnan(raw_arr[6]):
-            self.current_alignment_ok = abs(self.filtered_curr[6] - raw_arr[6]) <= 0.40
+
+        # Estimate end-effector force from joint torques
+        q_rad = np.deg2rad(np.array(joints, dtype=np.float64))
+        tau_meas = np.array(torques[:6], dtype=np.float64)
+
+        # Numerical differentiation: q_dot, q_ddot
+        qd = np.zeros(6, dtype=np.float64)
+        qdd = np.zeros(6, dtype=np.float64)
+        if self._q_prev is not None and self._t_prev is not None:
+            dt = now - self._t_prev
+            if dt > 1e-6:
+                qd_raw = (q_rad - self._q_prev) / dt
+                self._qd_filt = self._dyn_ema * qd_raw + (1 - self._dyn_ema) * self._qd_filt
+                qd = self._qd_filt
+                if self._qd_prev is not None:
+                    qdd_raw = (qd_raw - self._qd_prev) / dt
+                    self._qdd_filt = self._dyn_ema * qdd_raw + (1 - self._dyn_ema) * self._qdd_filt
+                    qdd = self._qdd_filt
+                self._qd_prev = qd_raw
+        self._q_prev = q_rad.copy()
+        self._t_prev = now
+
+        if self.tau_bias is not None:
+            # Full inverse dynamics: g(q) + C(q,qd)*qd + M(q)*qdd
+            tau_model = self.dynamics.inverse_dynamics(q_rad, qd, qdd)
+            tau_ext = tau_meas - tau_model - self.tau_bias
+        elif self.tau_gravity is not None:
+            # Fallback: legacy static offset
+            tau_ext = tau_meas - self.tau_gravity
+        else:
+            tau_ext = np.zeros(6)
+        J = compute_jacobian(q_rad)
+        f_raw = estimate_wrench(tau_ext, J)
+        self.ee_force = self.ee_force_ema * f_raw + (1 - self.ee_force_ema) * self.ee_force
 
         self.last_state = {
             "ts": now,
             "joints_deg": joints,
             "pose_xyzrpy_deg": list(self.target_pose),
             "gripper_pos": float(self.gripper_pos),
-            "currents": currents,
-            "currents_filtered": [float(x) if not np.isnan(x) else None for x in self.filtered_curr.tolist()],
-            "gripper_current_source": "register_0x0003" if self.reg_gripper_ok else "arm_currents_axis7",
+            "torques": torques,
+            "torques_filtered": [float(x) if not np.isnan(x) else None for x in self.filtered_curr.tolist()],
+            "ee_force": self.ee_force.tolist(),
         }
         self.last_state_ts = now
         return dict(self.last_state)
@@ -1254,13 +1373,15 @@ class TeleopApp:
               f"{self.lerobot_dataset.meta.total_frames} frames)")
 
     def print_currents(self, state):
-        cur = state["currents"]
+        tau = state["torques"]
+        f = state.get("ee_force", [0.0] * 6)
+        f_mag = (f[0]**2 + f[1]**2 + f[2]**2) ** 0.5
         frame = "TOOL" if self.use_tool_coord else "BASE"
         line = (
             f"[{frame}] "
-            f"J1:{cur[0]:6.2f}  J2:{cur[1]:6.2f}  J3:{cur[2]:6.2f}  "
-            f"J4:{cur[3]:6.2f}  J5:{cur[4]:6.2f}  J6:{cur[5]:6.2f}  "
-            f"GRIP:{cur[6]:6.2f}"
+            f"J1:{tau[0]:6.2f} J2:{tau[1]:6.2f} J3:{tau[2]:6.2f} "
+            f"J4:{tau[3]:6.2f} J5:{tau[4]:6.2f} J6:{tau[5]:6.2f}  "
+            f"|F|:{f_mag:5.1f}N"
         )
         sys.stdout.write("\r" + line)
         sys.stdout.flush()
@@ -1373,6 +1494,8 @@ def main():
     parser.add_argument("--vcodec", default="libsvtav1", help="Video codec for LeRobot streaming encoding")
     parser.add_argument("--encoder-threads", type=int, default=2, help="Threads per video encoder")
     parser.add_argument("--encoder-queue-maxsize", type=int, default=30, help="Max buffered frames per camera")
+    parser.add_argument("--tool-mass", type=float, default=0.82, help="Tool/gripper mass in kg")
+    parser.add_argument("--tool-com-z", type=float, default=0.06, help="Tool CoM offset from flange in m")
     parser.add_argument("--self-check", action="store_true")
     args = parser.parse_args()
 
@@ -1407,6 +1530,8 @@ def main():
         args.vcodec,
         args.encoder_threads,
         args.encoder_queue_maxsize,
+        args.tool_mass,
+        args.tool_com_z,
     )
 
     def _handle(_sig, _frm):

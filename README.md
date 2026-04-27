@@ -44,6 +44,7 @@ export PYTHONPATH=~/lerobot/src:$PYTHONPATH
 | Mouse move | Rotate X/Y-axis (pitch/yaw) |
 | Left click | Toggle gripper |
 | Right click | Open gripper (gradual) |
+| Tab | Toggle BASE / TOOL coordinate frame |
 | 1/2/3 | Speed 0.5x / 1x / 2x |
 | R | Return to home position |
 | **Enter** | **Save current episode** |
