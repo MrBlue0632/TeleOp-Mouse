@@ -5,3 +5,6 @@ data/
 logs/
 *.mp4
 .pytest_cache/
+dynamics/calibration/traj/*.parquet
+dynamics/calibration/torque/*.parquet
+dynamics/calibration/compensation/*.pt

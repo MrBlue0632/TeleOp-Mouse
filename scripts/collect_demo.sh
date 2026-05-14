@@ -12,7 +12,7 @@ set -euo pipefail
 # ============================================================
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-SCRIPT_PATH="${ROOT_DIR}/scripts/teleop_keyboard_mouse.py"
+SCRIPT_PATH="${ROOT_DIR}/scripts/teleop.py"
 
 # ---------- 默认配置 ----------
 ROBOT_IP="${ROBOT_IP:-192.168.1.199}"
@@ -37,7 +37,11 @@ export DISPLAY="${DISPLAY:-:0}"
 # ---------- conda 环境 ----------
 if [ -f "${HOME}/anaconda3/etc/profile.d/conda.sh" ]; then
     source "${HOME}/anaconda3/etc/profile.d/conda.sh"
-    conda activate base
+    if [ -n "${TELEOP_CONDA_ENV:-}" ]; then
+        conda activate "${TELEOP_CONDA_ENV}"
+    elif [ -z "${CONDA_DEFAULT_ENV:-}" ]; then
+        conda activate xarm
+    fi
 fi
 
 # lerobot 源码路径（如果未通过 pip 安装）
@@ -47,13 +51,12 @@ fi
 
 # ---------- 依赖检查 ----------
 python3 - <<'PY' || exit 1
-import importlib, sys
-required = ["pynput", "xarm", "numpy", "cv2", "lerobot"]
+import importlib.util
+import sys
+required = ["pynput", "xarm", "numpy", "cv2", "lerobot", "pybullet"]
 missing = []
 for m in required:
-    try:
-        importlib.import_module(m)
-    except ImportError:
+    if importlib.util.find_spec(m) is None:
         missing.append(m)
 if missing:
     print(f"[ERROR] missing packages: {', '.join(missing)}", file=sys.stderr)
@@ -62,7 +65,7 @@ print("[OK] all dependencies available")
 PY
 
 # ---------- 清理旧进程 ----------
-OLD_PIDS="$(pgrep -f "teleop_keyboard_mouse.py" || true)"
+OLD_PIDS="$(pgrep -f "teleop.py|teleop_keyboard_mouse.py" || true)"
 if [ -n "${OLD_PIDS}" ]; then
     echo "[INFO] stopping stale teleop processes: ${OLD_PIDS}"
     kill ${OLD_PIDS} 2>/dev/null || true
@@ -123,6 +126,7 @@ echo "  Repo ID       : ${REPO_ID}"
 echo "  Task          : ${TASK}"
 echo "  FPS           : ${RATE_HZ}"
 echo "  Codec         : ${VCODEC}"
+echo "  Torque Data   : raw/model/external/bias + EE wrench"
 echo "  ---"
 echo "  Wrist Camera  : ${WRIST_CAM_DEV}"
 echo "  Base Camera   : ${BASE_CAM_DEV}"

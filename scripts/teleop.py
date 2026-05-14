@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import argparse
 import collections
+import json
 import os
 import shutil
 import signal
@@ -13,12 +14,16 @@ from datetime import datetime
 
 os.environ.setdefault("QT_QPA_FONTDIR", "/usr/share/fonts/truetype/dejavu")
 
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if REPO_ROOT not in sys.path:
+    sys.path.insert(0, REPO_ROOT)
+
 import cv2
 import numpy as np
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
+from robot_control.torque_estimation import FirmwareBiasTorqueEstimator
 from xarm.core.config.x_config import XCONF
 from xarm.wrapper import XArmAPI
-from xarm6_dynamics import XArm6Dynamics
 
 
 def clip(v, lo, hi):
@@ -286,7 +291,7 @@ class TkVideoWindow:
 
 
 class TeleopApp:
-    def __init__(self, robot_ip, rate_hz, control_hz, data_dir, camera_id, camera_dev, base_camera_id, base_camera_dev, target_camera_id, target_camera_dev, display_camera, strict_camera_dev, show_video, fps_mouse, sdk_timeout_s, video_hz, repo_id, task, vcodec, encoder_threads, encoder_queue_maxsize, tool_mass=0.82, tool_com_z=0.06):
+    def __init__(self, robot_ip, rate_hz, control_hz, data_dir, camera_id, camera_dev, base_camera_id, base_camera_dev, target_camera_id, target_camera_dev, display_camera, strict_camera_dev, show_video, fps_mouse, sdk_timeout_s, video_hz, repo_id, task, vcodec, encoder_threads, encoder_queue_maxsize):
         self.robot_ip = robot_ip
         self.rate_hz = rate_hz
         self.control_hz = float(control_hz)
@@ -340,18 +345,21 @@ class TeleopApp:
 
         self.lerobot_dataset = None
         self.pose_dirty = False
-        self.tau_gravity = None  # legacy static calibration (fallback)
         self.ee_force = np.zeros(6, dtype=np.float64)  # [Fx,Fy,Fz,Tx,Ty,Tz]
         self.ee_force_ema = 0.1  # EMA filter coefficient
-        self.dynamics = XArm6Dynamics(tool_mass=tool_mass, tool_com=[0.0, 0.0, tool_com_z])
-        self.tau_bias = None  # residual bias after dynamics model
+        self.torque_estimator = FirmwareBiasTorqueEstimator()
+        self.last_torque_estimate = {
+            "lambda": 0.0,
+            "tau_model": np.zeros(6, dtype=np.float64),
+            "tau_comp": np.zeros(6, dtype=np.float64),
+            "tau_firmware_bias": np.zeros(6, dtype=np.float64),
+            "tau_external": np.zeros(6, dtype=np.float64),
+        }
         # Numerical differentiation state for q_dot, q_ddot
-        self._q_prev = None       # previous joint angles (rad)
-        self._qd_prev = None      # previous joint velocity (rad/s)
+        self._q_prev = None       # previous joint angles (deg)
         self._t_prev = None       # previous timestamp (s)
-        self._qd_filt = np.zeros(6, dtype=np.float64)  # EMA-filtered velocity
-        self._qdd_filt = np.zeros(6, dtype=np.float64)  # EMA-filtered acceleration
-        self._dyn_ema = 0.3       # EMA coefficient for velocity/acceleration
+        self._qd_filt = np.zeros(6, dtype=np.float64)  # EMA-filtered velocity (deg/s)
+        self._dyn_ema = 0.3       # EMA coefficient for fallback velocity
 
         self.Key = None
         self.Button = None
@@ -382,7 +390,7 @@ class TeleopApp:
         self.diag_fail_streak = 0
         self.diag_last_recover_ts = 0.0
 
-        self.window_name = "Teleop Video+Currents"
+        self.window_name = "Teleop Video+Torques"
         self.video_window_scale = 2.5
         self.video_window = None
         self.speed_scale = SPEED_PRESETS["2"]
@@ -416,7 +424,6 @@ class TeleopApp:
         self.arm.set_mode(0)
         self.arm.set_state(0)
         self.reset_to_home_on_start()
-        self.calibrate_gravity_torques()
         self.enter_realtime_velocity_mode()
 
         pret = self.arm.get_position(is_radian=False)
@@ -432,6 +439,10 @@ class TeleopApp:
             "pose_xyzrpy_deg": list(self.target_pose),
             "gripper_pos": float(self.gripper_pos),
             "torques": [0.0] * 7,
+            "torque_external": [0.0] * 6,
+            "torque_model": [0.0] * 6,
+            "torque_firmware_bias": [0.0] * 6,
+            "torque_lambda": 0.0,
             "ee_force": [0.0] * 6,
         }
         self.last_state_ts = 0.0
@@ -490,6 +501,26 @@ class TeleopApp:
                 "shape": (7,),
                 "names": ["J1", "J2", "J3", "J4", "J5", "J6", "gripper"],
             },
+            "observation.torque_external": {
+                "dtype": "float32",
+                "shape": (6,),
+                "names": ["J1", "J2", "J3", "J4", "J5", "J6"],
+            },
+            "observation.torque_model": {
+                "dtype": "float32",
+                "shape": (6,),
+                "names": ["J1", "J2", "J3", "J4", "J5", "J6"],
+            },
+            "observation.torque_firmware_bias": {
+                "dtype": "float32",
+                "shape": (6,),
+                "names": ["J1", "J2", "J3", "J4", "J5", "J6"],
+            },
+            "observation.torque_bias_lambda": {
+                "dtype": "float32",
+                "shape": (1,),
+                "names": ["lambda"],
+            },
             "observation.ee_force": {
                 "dtype": "float32",
                 "shape": (6,),
@@ -500,6 +531,22 @@ class TeleopApp:
     def _init_lerobot_dataset(self):
         root = os.path.join(self.data_dir, "lerobot_dataset")
         features = self._build_lerobot_features()
+        info_path = os.path.join(root, "meta", "info.json")
+
+        if os.path.isdir(root) and os.path.isfile(info_path):
+            try:
+                with open(info_path, "r", encoding="utf-8") as f:
+                    existing_features = json.load(f).get("features", {})
+            except Exception:
+                existing_features = {}
+            missing_features = sorted(set(features) - set(existing_features))
+            if missing_features:
+                stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                root = os.path.join(self.data_dir, f"lerobot_torque_dataset_{stamp}")
+                print(
+                    "[WARN] existing dataset schema does not contain torque fields; "
+                    f"creating new dataset at {root}"
+                )
 
         if os.path.isdir(root) and os.path.isfile(os.path.join(root, "meta", "info.json")):
             print(f"[INFO] resuming existing LeRobot dataset at {root}")
@@ -527,38 +574,6 @@ class TeleopApp:
             )
         print(f"[INFO] LeRobot dataset ready: {self.lerobot_dataset.num_episodes} episodes, "
               f"{self.lerobot_dataset.meta.total_frames} frames")
-
-    def calibrate_gravity_torques(self, duration_s=2.0, rate=20.0):
-        """Calibrate residual torque bias using dynamics model at home position."""
-        # Read current joint angles for model prediction
-        jret = self.arm.get_servo_angle(is_radian=True)
-        if jret and jret[0] == 0:
-            q_home = np.array(jret[1][:6], dtype=np.float64)
-        else:
-            q_home = np.deg2rad(RESET_HOME_JOINTS_DEG)
-        g_model_home = self.dynamics.gravity_torques(q_home)
-
-        # Collect measured torque samples
-        n = int(duration_s * rate)
-        print(f"[CALIB] Collecting {n} torque samples — keep robot still!")
-        samples = []
-        dt = 1.0 / rate
-        for _ in range(n):
-            code, tau = self.arm.get_joints_torque()
-            if code == 0 and tau:
-                samples.append(tau[:6])
-            time.sleep(dt)
-
-        if len(samples) < 5:
-            print("[WARN] Not enough samples, using model gravity without bias")
-            self.tau_bias = np.zeros(6)
-            return
-
-        tau_measured_home = np.median(samples, axis=0)
-        self.tau_bias = tau_measured_home - g_model_home
-        print(f"[CALIB] Model g(q):  [{', '.join(f'{v:+.2f}' for v in g_model_home)}] Nm")
-        print(f"[CALIB] Measured:    [{', '.join(f'{v:+.2f}' for v in tau_measured_home)}] Nm")
-        print(f"[CALIB] Bias (res.): [{', '.join(f'{v:+.2f}' for v in self.tau_bias)}] Nm")
 
     def ensure_robot_ready(self, timeout_s=6.0):
         deadline = time.monotonic() + timeout_s
@@ -800,6 +815,9 @@ class TeleopApp:
         pose = [float(x) for x in state.get("pose_xyzrpy_deg", [0.0] * 6)]
         filtered = state.get("torques_filtered", [0.0] * 7)
         torques_filtered = [float(x) if x is not None else 0.0 for x in filtered]
+        tau_external = state.get("torque_external", [0.0] * 6)
+        tau_model = state.get("torque_model", [0.0] * 6)
+        tau_firmware_bias = state.get("torque_firmware_bias", [0.0] * 6)
 
         frame_dict = {
             "observation.state": obs_state,
@@ -811,6 +829,10 @@ class TeleopApp:
             "observation.pose_xyzrpy_deg": np.array(pose, dtype=np.float32),
             "observation.torques": np.array(torques, dtype=np.float32),
             "observation.torques_filtered": np.array(torques_filtered, dtype=np.float32),
+            "observation.torque_external": np.array(tau_external, dtype=np.float32),
+            "observation.torque_model": np.array(tau_model, dtype=np.float32),
+            "observation.torque_firmware_bias": np.array(tau_firmware_bias, dtype=np.float32),
+            "observation.torque_bias_lambda": np.array([state.get("torque_lambda", 0.0)], dtype=np.float32),
             "observation.ee_force": np.array(state.get("ee_force", [0.0] * 6), dtype=np.float32),
             "task": self.task_description,
         }
@@ -942,9 +964,8 @@ class TeleopApp:
             cv2.rectangle(panel, (bar_x, y + 4), (bar_x + fill, y + 24), color, -1)
             cv2.rectangle(panel, (bar_x, y + 4), (bar_x + bar_w, y + 24), (110, 110, 120), 1)
 
-        check_txt = "CAL:OK" if self.current_alignment_ok else "CAL:WARN"
-        check_color = (70, 220, 110) if self.current_alignment_ok else (60, 120, 255)
-        cv2.putText(panel, check_txt, (14, h - 14), cv2.FONT_HERSHEY_SIMPLEX, 0.58, check_color, 1)
+        lam = float(self.last_state.get("torque_lambda", 0.0))
+        cv2.putText(panel, f"bias lambda:{lam:.2f}", (14, h - 14), cv2.FONT_HERSHEY_SIMPLEX, 0.58, (70, 220, 110), 1)
 
     def _get_display_camera(self):
         """Return the camera stream used for the video display panel."""
@@ -1227,7 +1248,11 @@ class TeleopApp:
             pose = [float(v) for v in pret[1][:6]]
             self.target_pose = list(pose)
             self.latest_rpy_deg = [pose[3], pose[4], pose[5]]
-        torques = list(self.arm.joints_torque) if self.arm.joints_torque is not None else self.last_state["torques"]
+        code_tau, tau_read = self.arm.get_joints_torque()
+        if code_tau == 0 and tau_read:
+            torques = list(tau_read)
+        else:
+            torques = list(self.arm.joints_torque) if self.arm.joints_torque is not None else self.last_state["torques"]
         if len(torques) < 7:
             torques = torques + [0.0] * (7 - len(torques))
         torques = [float(t) for t in torques[:7]]
@@ -1235,36 +1260,26 @@ class TeleopApp:
         raw_arr = np.array(torques, dtype=np.float64)
         self.update_filtered_currents(raw_arr)
 
-        # Estimate end-effector force from joint torques
-        q_rad = np.deg2rad(np.array(joints, dtype=np.float64))
+        q_deg = np.array(joints, dtype=np.float64)
+        q_rad = np.deg2rad(q_deg)
         tau_meas = np.array(torques[:6], dtype=np.float64)
 
-        # Numerical differentiation: q_dot, q_ddot
         qd = np.zeros(6, dtype=np.float64)
-        qdd = np.zeros(6, dtype=np.float64)
-        if self._q_prev is not None and self._t_prev is not None:
-            dt = now - self._t_prev
-            if dt > 1e-6:
-                qd_raw = (q_rad - self._q_prev) / dt
-                self._qd_filt = self._dyn_ema * qd_raw + (1 - self._dyn_ema) * self._qd_filt
+        speeds = getattr(self.arm, "realtime_joint_speeds", None)
+        if speeds is not None and len(speeds) >= 6:
+            qd = np.array(speeds[:6], dtype=np.float64)
+        elif self._q_prev is not None and self._t_prev is not None:
+            dt_state = now - self._t_prev
+            if dt_state > 1e-6:
+                qd_raw = (q_deg - self._q_prev) / dt_state
+                self._qd_filt = self._dyn_ema * qd_raw + (1.0 - self._dyn_ema) * self._qd_filt
                 qd = self._qd_filt
-                if self._qd_prev is not None:
-                    qdd_raw = (qd_raw - self._qd_prev) / dt
-                    self._qdd_filt = self._dyn_ema * qdd_raw + (1 - self._dyn_ema) * self._qdd_filt
-                    qdd = self._qdd_filt
-                self._qd_prev = qd_raw
-        self._q_prev = q_rad.copy()
+        self._q_prev = q_deg.copy()
         self._t_prev = now
 
-        if self.tau_bias is not None:
-            # Full inverse dynamics: g(q) + C(q,qd)*qd + M(q)*qdd
-            tau_model = self.dynamics.inverse_dynamics(q_rad, qd, qdd)
-            tau_ext = tau_meas - tau_model - self.tau_bias
-        elif self.tau_gravity is not None:
-            # Fallback: legacy static offset
-            tau_ext = tau_meas - self.tau_gravity
-        else:
-            tau_ext = np.zeros(6)
+        estimate = self.torque_estimator.update(q_deg, qd, tau_meas)
+        self.last_torque_estimate = estimate
+        tau_ext = estimate["tau_external"]
         J = compute_jacobian(q_rad)
         f_raw = estimate_wrench(tau_ext, J)
         self.ee_force = self.ee_force_ema * f_raw + (1 - self.ee_force_ema) * self.ee_force
@@ -1276,6 +1291,10 @@ class TeleopApp:
             "gripper_pos": float(self.gripper_pos),
             "torques": torques,
             "torques_filtered": [float(x) if not np.isnan(x) else None for x in self.filtered_curr.tolist()],
+            "torque_external": estimate["tau_external"].tolist(),
+            "torque_model": estimate["tau_model"].tolist(),
+            "torque_firmware_bias": estimate["tau_firmware_bias"].tolist(),
+            "torque_lambda": float(estimate["lambda"]),
             "ee_force": self.ee_force.tolist(),
         }
         self.last_state_ts = now
@@ -1451,6 +1470,8 @@ class TeleopApp:
             self.base_camera.close()
         if self.target_camera is not None:
             self.target_camera.close()
+        if self.torque_estimator is not None:
+            self.torque_estimator.close()
         self.arm.disconnect()
 
 
@@ -1494,8 +1515,6 @@ def main():
     parser.add_argument("--vcodec", default="libsvtav1", help="Video codec for LeRobot streaming encoding")
     parser.add_argument("--encoder-threads", type=int, default=2, help="Threads per video encoder")
     parser.add_argument("--encoder-queue-maxsize", type=int, default=30, help="Max buffered frames per camera")
-    parser.add_argument("--tool-mass", type=float, default=0.82, help="Tool/gripper mass in kg")
-    parser.add_argument("--tool-com-z", type=float, default=0.06, help="Tool CoM offset from flange in m")
     parser.add_argument("--self-check", action="store_true")
     args = parser.parse_args()
 
@@ -1530,8 +1549,6 @@ def main():
         args.vcodec,
         args.encoder_threads,
         args.encoder_queue_maxsize,
-        args.tool_mass,
-        args.tool_com_z,
     )
 
     def _handle(_sig, _frm):

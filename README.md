@@ -15,7 +15,7 @@ pip install lerobot
 export PYTHONPATH=~/lerobot/src:$PYTHONPATH
 ```
 
-**Required packages:** `pynput`, `xarm-python-sdk`, `numpy`, `opencv-python`, `lerobot`
+**Required packages:** `pynput`, `xarm-python-sdk`, `numpy`, `opencv-python`, `lerobot`, `pybullet`
 
 ## Quick Start
 
@@ -71,14 +71,19 @@ data/lerobot_dataset/
 
 | Feature | Shape | Description |
 |---------|-------|-------------|
-| `observation.state` | (14,) | 6 joints + gripper + 7 currents |
+| `observation.state` | (14,) | 6 joints + gripper + 7 raw torques |
 | `action` | (7,) | 6 velocity + gripper action |
 | `observation.images.wrist` | (480,640,3) | Wrist camera (video) |
 | `observation.images.base` | (480,640,3) | Base camera (video) |
 | `observation.joints_deg` | (6,) | Joint angles in degrees |
 | `observation.pose_xyzrpy_deg` | (6,) | End-effector pose |
-| `observation.currents` | (7,) | Raw joint currents |
-| `observation.currents_filtered` | (7,) | Filtered currents |
+| `observation.torques` | (7,) | Raw API joint torques |
+| `observation.torques_filtered` | (7,) | Filtered joint torques |
+| `observation.torque_external` | (6,) | Estimated external joint torques |
+| `observation.torque_model` | (6,) | Gravity + Coriolis model torque |
+| `observation.torque_firmware_bias` | (6,) | Firmware-bias compensation term |
+| `observation.torque_bias_lambda` | (1,) | Motion/static blend used for firmware-bias compensation |
+| `observation.ee_force` | (6,) | Estimated end-effector wrench `[Fx,Fy,Fz,Tx,Ty,Tz]` |
 
 ## Loading Dataset
 

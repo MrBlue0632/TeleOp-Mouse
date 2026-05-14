@@ -1,0 +1,94 @@
+"""Torque estimation helpers shared by teleop and diagnostics."""
+
+import numpy as np
+
+from .constants import N_JOINTS
+
+
+MOTION_SPEED_THR = 2.0
+BLEND_ALPHA = 0.2
+SETTLE_LAM_THR = 0.05
+DETECT_EMA_ALPHA = 0.05
+
+BIAS_LEVELS = {
+    1: (0.0000, 0.0000),
+    2: (-4.5056, 4.0151),
+    3: (-2.4267, 3.3561),
+    4: (0.0857, 0.0857),
+    5: (-1.9928, 0.9617),
+    6: (0.1845, 0.1845),
+}
+
+BIAS_MIDPOINTS = np.array(
+    [(BIAS_LEVELS[j + 1][0] + BIAS_LEVELS[j + 1][1]) / 2.0 for j in range(N_JOINTS)],
+    dtype=np.float64,
+)
+BIAS_IS_BIMODAL = np.array(
+    [BIAS_LEVELS[j + 1][0] != BIAS_LEVELS[j + 1][1] for j in range(N_JOINTS)],
+    dtype=bool,
+)
+
+
+class FirmwareBiasTorqueEstimator:
+    """Estimate external joint torque from xArm API torque reports.
+
+    Inputs are joint position in degrees, joint speed in deg/s, and measured
+    joint torque in Nm. Outputs are Nm.
+    """
+
+    def __init__(self, dynamics=None):
+        if dynamics is None:
+            from .dynamics import DynamicsModel
+
+            dynamics = DynamicsModel()
+        self.dynamics = dynamics
+        self.lam = 0.0
+        self.detected_bias = np.zeros(N_JOINTS, dtype=np.float64)
+        self.resid_ema = np.zeros(N_JOINTS, dtype=np.float64)
+        self.ema_initialized = False
+
+    def update(self, q_deg, qd_dps, tau_api):
+        q = np.asarray(q_deg, dtype=np.float64)[:N_JOINTS]
+        qd = np.asarray(qd_dps, dtype=np.float64)[:N_JOINTS]
+        tau = np.asarray(tau_api, dtype=np.float64)[:N_JOINTS]
+
+        max_speed = float(np.abs(qd).max()) if qd.size else 0.0
+        is_moving = float(max_speed > MOTION_SPEED_THR)
+        self.lam = (1.0 - BLEND_ALPHA) * self.lam + BLEND_ALPHA * is_moving
+
+        tau_model = self.dynamics.gravity(q) + self.dynamics.coriolis(q, qd)
+        resid = tau - tau_model
+
+        if self.lam < SETTLE_LAM_THR:
+            if not self.ema_initialized:
+                self.resid_ema[:] = resid
+                self.ema_initialized = True
+            else:
+                self.resid_ema += DETECT_EMA_ALPHA * (resid - self.resid_ema)
+
+            for j in range(N_JOINTS):
+                if BIAS_IS_BIMODAL[j]:
+                    lo, hi = BIAS_LEVELS[j + 1]
+                    self.detected_bias[j] = hi if self.resid_ema[j] > BIAS_MIDPOINTS[j] else lo
+                else:
+                    self.detected_bias[j] = BIAS_LEVELS[j + 1][0]
+        else:
+            self.ema_initialized = False
+
+        tau_comp = np.zeros(N_JOINTS, dtype=np.float64)
+        tau_jump = self.detected_bias * (1.0 - self.lam)
+        tau_external = tau - tau_model - tau_comp - tau_jump
+
+        return {
+            "lambda": float(self.lam),
+            "tau_api": tau,
+            "tau_model": tau_model,
+            "tau_comp": tau_comp,
+            "tau_firmware_bias": tau_jump,
+            "tau_external": tau_external,
+        }
+
+    def close(self):
+        close = getattr(self.dynamics, "close", None)
+        if callable(close):
+            close()
