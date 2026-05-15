@@ -291,7 +291,7 @@ class TkVideoWindow:
 
 
 class TeleopApp:
-    def __init__(self, robot_ip, rate_hz, control_hz, data_dir, camera_id, camera_dev, base_camera_id, base_camera_dev, target_camera_id, target_camera_dev, display_camera, strict_camera_dev, show_video, fps_mouse, sdk_timeout_s, video_hz, repo_id, task, vcodec, encoder_threads, encoder_queue_maxsize):
+    def __init__(self, robot_ip, rate_hz, control_hz, data_dir, camera_id, camera_dev, base_camera_id, base_camera_dev, target_camera_id, target_camera_dev, display_camera, strict_camera_dev, show_video, fps_mouse, sdk_timeout_s, video_hz, repo_id, task, vcodec, encoder_threads, encoder_queue_maxsize, torque_comp_model=None):
         self.robot_ip = robot_ip
         self.rate_hz = rate_hz
         self.control_hz = float(control_hz)
@@ -313,6 +313,7 @@ class TeleopApp:
         self.vcodec = vcodec
         self.encoder_threads = encoder_threads
         self.encoder_queue_maxsize = encoder_queue_maxsize
+        self.torque_comp_model = torque_comp_model
         self.camera_probe_timeout_s = 1.8
 
         # 2x faster than previous defaults, while still conservative
@@ -347,13 +348,17 @@ class TeleopApp:
         self.pose_dirty = False
         self.ee_force = np.zeros(6, dtype=np.float64)  # [Fx,Fy,Fz,Tx,Ty,Tz]
         self.ee_force_ema = 0.1  # EMA filter coefficient
-        self.torque_estimator = FirmwareBiasTorqueEstimator()
+        self.torque_estimator = FirmwareBiasTorqueEstimator(compensation_path=self.torque_comp_model)
         self.last_torque_estimate = {
             "lambda": 0.0,
             "tau_model": np.zeros(6, dtype=np.float64),
             "tau_comp": np.zeros(6, dtype=np.float64),
+            "tau_static_bias": np.zeros(6, dtype=np.float64),
+            "tau_motion_comp": np.zeros(6, dtype=np.float64),
             "tau_firmware_bias": np.zeros(6, dtype=np.float64),
             "tau_external": np.zeros(6, dtype=np.float64),
+            "time_since_stop": np.zeros(6, dtype=np.float64),
+            "firmware_state": np.zeros(6, dtype=np.float64),
         }
         # Numerical differentiation state for q_dot, q_ddot
         self._q_prev = None       # previous joint angles (deg)
@@ -511,6 +516,16 @@ class TeleopApp:
                 "shape": (6,),
                 "names": ["J1", "J2", "J3", "J4", "J5", "J6"],
             },
+            "observation.torque_static_bias": {
+                "dtype": "float32",
+                "shape": (6,),
+                "names": ["J1", "J2", "J3", "J4", "J5", "J6"],
+            },
+            "observation.torque_motion_comp": {
+                "dtype": "float32",
+                "shape": (6,),
+                "names": ["J1", "J2", "J3", "J4", "J5", "J6"],
+            },
             "observation.torque_firmware_bias": {
                 "dtype": "float32",
                 "shape": (6,),
@@ -520,6 +535,16 @@ class TeleopApp:
                 "dtype": "float32",
                 "shape": (1,),
                 "names": ["lambda"],
+            },
+            "observation.torque_time_since_stop": {
+                "dtype": "float32",
+                "shape": (6,),
+                "names": ["J1", "J2", "J3", "J4", "J5", "J6"],
+            },
+            "observation.torque_firmware_state": {
+                "dtype": "float32",
+                "shape": (6,),
+                "names": ["J1", "J2", "J3", "J4", "J5", "J6"],
             },
             "observation.ee_force": {
                 "dtype": "float32",
@@ -817,7 +842,11 @@ class TeleopApp:
         torques_filtered = [float(x) if x is not None else 0.0 for x in filtered]
         tau_external = state.get("torque_external", [0.0] * 6)
         tau_model = state.get("torque_model", [0.0] * 6)
+        tau_static_bias = state.get("torque_static_bias", [0.0] * 6)
+        tau_motion_comp = state.get("torque_motion_comp", [0.0] * 6)
         tau_firmware_bias = state.get("torque_firmware_bias", [0.0] * 6)
+        torque_time_since_stop = state.get("torque_time_since_stop", [0.0] * 6)
+        torque_firmware_state = state.get("torque_firmware_state", [0.0] * 6)
 
         frame_dict = {
             "observation.state": obs_state,
@@ -831,8 +860,12 @@ class TeleopApp:
             "observation.torques_filtered": np.array(torques_filtered, dtype=np.float32),
             "observation.torque_external": np.array(tau_external, dtype=np.float32),
             "observation.torque_model": np.array(tau_model, dtype=np.float32),
+            "observation.torque_static_bias": np.array(tau_static_bias, dtype=np.float32),
+            "observation.torque_motion_comp": np.array(tau_motion_comp, dtype=np.float32),
             "observation.torque_firmware_bias": np.array(tau_firmware_bias, dtype=np.float32),
             "observation.torque_bias_lambda": np.array([state.get("torque_lambda", 0.0)], dtype=np.float32),
+            "observation.torque_time_since_stop": np.array(torque_time_since_stop, dtype=np.float32),
+            "observation.torque_firmware_state": np.array(torque_firmware_state, dtype=np.float32),
             "observation.ee_force": np.array(state.get("ee_force", [0.0] * 6), dtype=np.float32),
             "task": self.task_description,
         }
@@ -1293,8 +1326,12 @@ class TeleopApp:
             "torques_filtered": [float(x) if not np.isnan(x) else None for x in self.filtered_curr.tolist()],
             "torque_external": estimate["tau_external"].tolist(),
             "torque_model": estimate["tau_model"].tolist(),
+            "torque_static_bias": estimate.get("tau_static_bias", np.zeros(6, dtype=np.float64)).tolist(),
+            "torque_motion_comp": estimate.get("tau_motion_comp", np.zeros(6, dtype=np.float64)).tolist(),
             "torque_firmware_bias": estimate["tau_firmware_bias"].tolist(),
             "torque_lambda": float(estimate["lambda"]),
+            "torque_time_since_stop": estimate.get("time_since_stop", np.zeros(6, dtype=np.float64)).tolist(),
+            "torque_firmware_state": estimate.get("firmware_state", np.zeros(6, dtype=np.float64)).tolist(),
             "ee_force": self.ee_force.tolist(),
         }
         self.last_state_ts = now
@@ -1515,6 +1552,7 @@ def main():
     parser.add_argument("--vcodec", default="libsvtav1", help="Video codec for LeRobot streaming encoding")
     parser.add_argument("--encoder-threads", type=int, default=2, help="Threads per video encoder")
     parser.add_argument("--encoder-queue-maxsize", type=int, default=30, help="Max buffered frames per camera")
+    parser.add_argument("--torque-comp-model", default=os.getenv("TELEOP_TORQUE_COMP_MODEL"), help="Optional hybrid torque compensation checkpoint")
     parser.add_argument("--self-check", action="store_true")
     args = parser.parse_args()
 
@@ -1549,6 +1587,7 @@ def main():
         args.vcodec,
         args.encoder_threads,
         args.encoder_queue_maxsize,
+        args.torque_comp_model,
     )
 
     def _handle(_sig, _frm):

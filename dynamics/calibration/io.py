@@ -10,7 +10,21 @@ import numpy as np
 import pandas as pd
 
 
-ARRAY_PREFIXES = ("q", "qd", "qdd", "tau_api", "tau_theory", "tau_comp", "tau_error")
+ARRAY_PREFIXES = (
+    "q",
+    "qd",
+    "qdd",
+    "tau_api",
+    "tau_theory",
+    "tau_comp",
+    "tau_error",
+    "tau_static_bias",
+    "tau_motion_comp",
+    "tau_firmware_bias",
+    "tau_external",
+    "time_since_stop",
+    "firmware_state",
+)
 
 
 class LowLatencyDifferentiator:
@@ -77,6 +91,15 @@ def make_record(
     tau_theory: np.ndarray | None = None,
     tau_comp: np.ndarray | None = None,
     tau_error: np.ndarray | None = None,
+    tau_static_bias: np.ndarray | None = None,
+    tau_motion_comp: np.ndarray | None = None,
+    tau_firmware_bias: np.ndarray | None = None,
+    tau_external: np.ndarray | None = None,
+    time_since_stop: np.ndarray | None = None,
+    firmware_state: np.ndarray | None = None,
+    motion_lambda: float | None = None,
+    is_moving: bool | None = None,
+    stop_event_id: int | None = None,
     source_file: str | None = None,
 ) -> dict:
     row = {
@@ -92,6 +115,18 @@ def make_record(
     _put_vector(row, "tau_theory", tau_theory, joint_count)
     _put_vector(row, "tau_comp", tau_comp, joint_count)
     _put_vector(row, "tau_error", tau_error, joint_count)
+    _put_vector(row, "tau_static_bias", tau_static_bias, joint_count)
+    _put_vector(row, "tau_motion_comp", tau_motion_comp, joint_count)
+    _put_vector(row, "tau_firmware_bias", tau_firmware_bias, joint_count)
+    _put_vector(row, "tau_external", tau_external, joint_count)
+    _put_vector(row, "time_since_stop", time_since_stop, joint_count)
+    _put_vector(row, "firmware_state", firmware_state, joint_count)
+    if motion_lambda is not None:
+        row["motion_lambda"] = float(motion_lambda)
+    if is_moving is not None:
+        row["is_moving"] = bool(is_moving)
+    if stop_event_id is not None:
+        row["stop_event_id"] = int(stop_event_id)
     return row
 
 

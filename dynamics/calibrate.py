@@ -34,8 +34,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--teach-sensitivity", type=int, help="xArm teach sensitivity 1-5")
     parser.add_argument("--traj", help="trajectory parquet for torque mode")
     parser.add_argument("--data", help="torque parquet for train mode")
+    parser.add_argument("--static-data", help="optional static-pose parquet for hybrid train mode")
+    parser.add_argument("--stop-data", help="optional stop-event parquet for hybrid train mode")
     parser.add_argument("--output-dir", help="output directory for traj/torque modes")
     parser.add_argument("--model-path", help="compensation model checkpoint path")
+    parser.add_argument("--model-kind", choices=["baseline", "hybrid"], default="baseline")
     parser.add_argument("--epochs", type=int, default=200)
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--hidden-dim", type=int, default=64)
@@ -67,6 +70,9 @@ def main() -> int:
             config,
             data_path=args.data,
             output_path=args.model_path or "dynamics/calibration/compensation/compensation.pt",
+            model_kind=args.model_kind,
+            static_data_path=args.static_data,
+            stop_data_path=args.stop_data,
             target=args.target,
             epochs=args.epochs,
             lr=args.lr,

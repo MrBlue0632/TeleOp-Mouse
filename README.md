@@ -81,8 +81,12 @@ data/lerobot_dataset/
 | `observation.torques_filtered` | (7,) | Filtered joint torques |
 | `observation.torque_external` | (6,) | Estimated external joint torques |
 | `observation.torque_model` | (6,) | Gravity + Coriolis model torque |
+| `observation.torque_static_bias` | (6,) | Position-dependent static residual compensation |
+| `observation.torque_motion_comp` | (6,) | Motion residual compensation |
 | `observation.torque_firmware_bias` | (6,) | Firmware-bias compensation term |
 | `observation.torque_bias_lambda` | (1,) | Motion/static blend used for firmware-bias compensation |
+| `observation.torque_time_since_stop` | (6,) | Per-joint stop duration used by hybrid compensation |
+| `observation.torque_firmware_state` | (6,) | Per-joint detected firmware bias level |
 | `observation.ee_force` | (6,) | Estimated end-effector wrench `[Fx,Fy,Fz,Tx,Ty,Tz]` |
 
 ## Loading Dataset
@@ -114,3 +118,27 @@ print(dataset[0])  # First frame
 | `RATE_HZ` | `30` | Data capture frequency |
 | `VCODEC` | `libsvtav1` | Video codec |
 | `CAMERA_ID` | `1` | Camera device index |
+
+## Hybrid Torque Compensation
+
+Train the legacy baseline MLP:
+
+```bash
+python -m dynamics.calibrate --mode train --model-kind baseline --data dynamics/calibration/torque/example.parquet
+```
+
+Train the hybrid per-joint compensator:
+
+```bash
+python -m dynamics.calibrate --mode train --model-kind hybrid \
+  --data dynamics/calibration/torque/motion.parquet \
+  --static-data dynamics/calibration/torque/static.parquet \
+  --stop-data dynamics/calibration/torque/stop.parquet \
+  --model-path dynamics/calibration/compensation/hybrid.pt
+```
+
+Use a hybrid checkpoint during teleop:
+
+```bash
+TELEOP_TORQUE_COMP_MODEL=dynamics/calibration/compensation/hybrid.pt ./scripts/collect_demo.sh
+```

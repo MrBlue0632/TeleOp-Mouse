@@ -46,8 +46,20 @@ def monitor(
                 qd, qdd = diff.update(sample.timestamp, sample.q, sample.qd)
                 tau_api = sample.tau_api if sample.tau_api is not None else np.zeros(joint_count)
                 tau_theory = model.estimate_joint_torque(sample.q, qd, qdd)
-                tau_comp = np.zeros(joint_count) if comp is None else comp.predict_compensation(sample.q, qd, qdd, tau_theory=tau_theory)
-                tau_error = tau_api - tau_theory - tau_comp
+                tau_static = np.zeros(joint_count)
+                tau_firmware = np.zeros(joint_count)
+                if comp is None:
+                    tau_comp = np.zeros(joint_count)
+                    tau_error = tau_api - tau_theory
+                elif hasattr(comp, "update"):
+                    estimate = comp.update(sample.q, qd, qdd, tau_api, tau_theory, timestamp=sample.timestamp)
+                    tau_comp = estimate.tau_comp
+                    tau_static = estimate.tau_static_bias
+                    tau_firmware = estimate.tau_firmware_bias
+                    tau_error = estimate.tau_external
+                else:
+                    tau_comp = comp.predict_compensation(sample.q, qd, qdd, tau_theory=tau_theory)
+                    tau_error = tau_api - tau_theory - tau_comp
                 line = " ".join(
                     [
                         _fmt_vec("q", sample.q, precision=3),
@@ -55,6 +67,8 @@ def monitor(
                         _fmt_vec("qdd", qdd, precision=2),
                         _fmt_vec("api", tau_api),
                         _fmt_vec("model", tau_theory),
+                        _fmt_vec("static", tau_static),
+                        _fmt_vec("fw", tau_firmware),
                         _fmt_vec("comp", tau_comp),
                         _fmt_vec("err", tau_error),
                     ]
