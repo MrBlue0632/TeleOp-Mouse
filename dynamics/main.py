@@ -1,10 +1,10 @@
-"""Calibration command entrypoint.
+"""Dynamics calibration command entrypoint.
 
 Examples:
-    python -m dynamics.calibrate --mode traj --robot xarm6 --ip 192.168.1.199
-    python -m dynamics.calibrate --mode torque --traj dynamics/calibration/traj/example.parquet
-    python -m dynamics.calibrate --mode train --data dynamics/calibration/torque/example.parquet
-    python -m dynamics.calibrate --mode monitor --model-path dynamics/calibration/compensation/compensation.pt
+    python -m dynamics.main --mode traj --robot xarm6 --ip 192.168.1.199
+    python -m dynamics.main --mode torque --traj dynamics/calibration/traj/example.parquet
+    python -m dynamics.main --mode train --data dynamics/calibration/torque/example.parquet
+    python -m dynamics.main --mode monitor --model-path dynamics/calibration/compensation/compensation.pt
 """
 
 from __future__ import annotations

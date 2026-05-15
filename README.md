@@ -124,13 +124,13 @@ print(dataset[0])  # First frame
 Train the legacy baseline MLP:
 
 ```bash
-python -m dynamics.calibrate --mode train --model-kind baseline --data dynamics/calibration/torque/example.parquet
+python -m dynamics.main --mode train --model-kind baseline --data dynamics/calibration/torque/example.parquet
 ```
 
 Train the hybrid per-joint compensator:
 
 ```bash
-python -m dynamics.calibrate --mode train --model-kind hybrid \
+python -m dynamics.main --mode train --model-kind hybrid \
   --data dynamics/calibration/torque/motion.parquet \
   --static-data dynamics/calibration/torque/static.parquet \
   --stop-data dynamics/calibration/torque/stop.parquet \
