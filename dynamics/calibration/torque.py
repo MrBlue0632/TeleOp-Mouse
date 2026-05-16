@@ -14,6 +14,7 @@ from dynamics.resolver import resolve_robot
 
 from .compensation import load_compensation
 from .io import LowLatencyDifferentiator, extract_matrix, latest_parquet, make_record, read_parquet, timestamped_path, write_parquet
+from .runtime import estimate_torque_sample
 
 
 def resolve_traj_path(path: str | Path | None, traj_dir: str | Path = "dynamics/calibration/traj") -> Path:
@@ -73,34 +74,14 @@ def collect_torque_data(
                         time.sleep(delay)
                 sample = backend.read_sample()
                 qd, qdd = diff.update(sample.timestamp, sample.q, sample.qd)
-                tau_api = sample.tau_api if sample.tau_api is not None else np.zeros(joint_count)
-                tau_theory = model.estimate_joint_torque(sample.q, qd, qdd)
-                tau_static_bias = np.zeros(joint_count)
-                tau_motion_comp = np.zeros(joint_count)
-                tau_firmware_bias = np.zeros(joint_count)
-                tau_external = None
-                time_since_stop = None
-                firmware_state = None
-                motion_lambda = None
-                is_moving = None
-                if comp is None:
-                    tau_comp = np.zeros(joint_count)
-                elif hasattr(comp, "update"):
-                    estimate = comp.update(sample.q, qd, qdd, tau_api, tau_theory, timestamp=sample.timestamp)
-                    tau_comp = estimate.tau_comp
-                    tau_static_bias = estimate.tau_static_bias
-                    tau_motion_comp = estimate.tau_motion_comp
-                    tau_firmware_bias = estimate.tau_firmware_bias
-                    tau_external = estimate.tau_external
-                    time_since_stop = estimate.time_since_stop
-                    firmware_state = estimate.firmware_state
-                    motion_lambda = estimate.motion_lambda
-                    is_moving = bool(np.any(estimate.is_moving))
-                else:
-                    tau_comp = comp.predict_compensation(sample.q, qd, qdd, tau_theory=tau_theory)
-                tau_error = tau_api - tau_theory - tau_comp
-                if tau_external is None:
-                    tau_external = tau_error
+                estimate = estimate_torque_sample(
+                    sample=sample,
+                    qd=qd,
+                    qdd=qdd,
+                    joint_count=joint_count,
+                    model=model,
+                    compensator=comp,
+                )
                 records.append(
                     make_record(
                         timestamp=sample.timestamp,
@@ -110,18 +91,18 @@ def collect_torque_data(
                         q=sample.q,
                         qd=qd,
                         qdd=qdd,
-                        tau_api=tau_api,
-                        tau_theory=tau_theory,
-                        tau_comp=tau_comp,
-                        tau_error=tau_error,
-                        tau_static_bias=tau_static_bias,
-                        tau_motion_comp=tau_motion_comp,
-                        tau_firmware_bias=tau_firmware_bias,
-                        tau_external=tau_external,
-                        time_since_stop=time_since_stop,
-                        firmware_state=firmware_state,
-                        motion_lambda=motion_lambda,
-                        is_moving=is_moving,
+                        tau_api=estimate.tau_api,
+                        tau_theory=estimate.tau_theory,
+                        tau_comp=estimate.tau_comp,
+                        tau_error=estimate.tau_error,
+                        tau_static_bias=estimate.tau_static_bias,
+                        tau_motion_comp=estimate.tau_motion_comp,
+                        tau_firmware_bias=estimate.tau_firmware_bias,
+                        tau_external=estimate.tau_external,
+                        time_since_stop=estimate.time_since_stop,
+                        firmware_state=estimate.firmware_state,
+                        motion_lambda=estimate.motion_lambda,
+                        is_moving=estimate.is_moving,
                         source_file=str(traj_file),
                     )
                 )

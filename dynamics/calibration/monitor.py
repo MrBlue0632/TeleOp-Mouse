@@ -14,6 +14,7 @@ from dynamics.resolver import resolve_robot
 
 from .compensation import load_compensation
 from .io import LowLatencyDifferentiator
+from .runtime import estimate_torque_sample
 
 
 def _fmt_vec(name: str, vec: np.ndarray, width: int = 7, precision: int = 2) -> str:
@@ -44,33 +45,25 @@ def monitor(
             while True:
                 sample = backend.read_sample()
                 qd, qdd = diff.update(sample.timestamp, sample.q, sample.qd)
-                tau_api = sample.tau_api if sample.tau_api is not None else np.zeros(joint_count)
-                tau_theory = model.estimate_joint_torque(sample.q, qd, qdd)
-                tau_static = np.zeros(joint_count)
-                tau_firmware = np.zeros(joint_count)
-                if comp is None:
-                    tau_comp = np.zeros(joint_count)
-                    tau_error = tau_api - tau_theory
-                elif hasattr(comp, "update"):
-                    estimate = comp.update(sample.q, qd, qdd, tau_api, tau_theory, timestamp=sample.timestamp)
-                    tau_comp = estimate.tau_comp
-                    tau_static = estimate.tau_static_bias
-                    tau_firmware = estimate.tau_firmware_bias
-                    tau_error = estimate.tau_external
-                else:
-                    tau_comp = comp.predict_compensation(sample.q, qd, qdd, tau_theory=tau_theory)
-                    tau_error = tau_api - tau_theory - tau_comp
+                estimate = estimate_torque_sample(
+                    sample=sample,
+                    qd=qd,
+                    qdd=qdd,
+                    joint_count=joint_count,
+                    model=model,
+                    compensator=comp,
+                )
                 line = " ".join(
                     [
                         _fmt_vec("q", sample.q, precision=3),
                         _fmt_vec("qd", qd, precision=3),
                         _fmt_vec("qdd", qdd, precision=2),
-                        _fmt_vec("api", tau_api),
-                        _fmt_vec("model", tau_theory),
-                        _fmt_vec("static", tau_static),
-                        _fmt_vec("fw", tau_firmware),
-                        _fmt_vec("comp", tau_comp),
-                        _fmt_vec("err", tau_error),
+                        _fmt_vec("api", estimate.tau_api),
+                        _fmt_vec("model", estimate.tau_theory),
+                        _fmt_vec("static", estimate.tau_static_bias),
+                        _fmt_vec("fw", estimate.tau_firmware_bias),
+                        _fmt_vec("comp", estimate.tau_comp),
+                        _fmt_vec("err", estimate.tau_external),
                     ]
                 )
                 sys.stdout.write("\r" + line[:240])

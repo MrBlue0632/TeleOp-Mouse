@@ -28,6 +28,27 @@ Use:
 python -m dynamics.main --mode <traj|torque|train|monitor>
 ```
 
+For Python callers, use the public facade:
+
+```python
+from dynamics.api import load_dynamics_config, run_mode
+
+config = load_dynamics_config(robot="xarm6")
+run_mode("traj", config, duration_s=10.0)
+```
+
+`main.py` owns the workflow orchestration:
+
+```text
+CLI args
+  -> main.parse_args()
+  -> main.run_cli_args()
+  -> config.load_config()
+  -> main.run_mode()
+  -> calibration record / torque / train / monitor
+  -> parquet, checkpoint, or terminal stream
+```
+
 Common options:
 
 | Option | Meaning |
@@ -81,7 +102,8 @@ Output: live terminal values for joint state, API torque, model torque, compensa
 
 | File | Purpose | Main Input | Main Output |
 | --- | --- | --- | --- |
-| `main.py` | CLI entrypoint | CLI args | Runs one mode |
+| `api.py` | Public Python facade over config/model/workflow helpers | Loaded config, mode args | Delegates to `main.py` or builds model helpers |
+| `main.py` | CLI entrypoint and workflow orchestrator | CLI args or loaded config | Runs one mode |
 | `config.py` | Load YAML config and CLI overrides | Config path, robot name, overrides | `dict` config |
 | `resolver.py` | Parse URDF and payload metadata | URDF path, payload config | `ResolvedRobot` |
 | `model.py` | Theoretical dynamics through PyBullet | `ResolvedRobot`, `q/qd/qdd` | mass matrix, gravity, Coriolis, inverse dynamics, estimated torque |
@@ -94,6 +116,7 @@ Output: live terminal values for joint state, API torque, model torque, compensa
 | File | Purpose | Main Input | Main Output |
 | --- | --- | --- | --- |
 | `calibration/io.py` | Parquet I/O and online differentiation | Records, DataFrame, `q/qd` | parquet files, matrices, `qd/qdd` |
+| `calibration/runtime.py` | Shared per-sample torque estimation | `RobotSample`, model, optional compensator | Torque estimate fields |
 | `calibration/record.py` | Record teach-mode trajectory | Config, duration, Hz | Trajectory parquet path |
 | `calibration/torque.py` | Replay trajectory and log torque | Config, trajectory parquet, optional model | Torque parquet path |
 | `calibration/train.py` | Train compensation checkpoint | Torque parquet, training args | `.pt` model path |
