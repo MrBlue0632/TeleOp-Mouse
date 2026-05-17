@@ -256,6 +256,13 @@ def train_hybrid_compensator(
     lr: float = 1e-3,
     hidden_dim: int = 64,
     seed: int = 7,
+    history_steps: int = 3,
+    firmware_min_level_gap: float = 1.0,
+    firmware_default_decay_tau_s: float = 0.35,
+    firmware_blend_alpha: float = 0.2,
+    firmware_settle_lambda_threshold: float = 0.05,
+    firmware_detect_ema_alpha: float = 0.05,
+    firmware_j3_jump_size: float = 5.28,
     embodiment: dict[str, Any] | None = None,
 ) -> tuple[HybridTorqueCompensator, dict[str, Any]]:
     q_arr = np.asarray(q, dtype=np.float64)
@@ -292,6 +299,12 @@ def train_hybrid_compensator(
             qd_arr,
             timestamps,
             speed_threshold=speed_threshold,
+            min_level_gap=firmware_min_level_gap,
+            default_decay_tau_s=firmware_default_decay_tau_s,
+            blend_alpha=firmware_blend_alpha,
+            settle_lambda_threshold=firmware_settle_lambda_threshold,
+            detect_ema_alpha=firmware_detect_ema_alpha,
+            j3_jump_size=firmware_j3_jump_size,
         )
     else:
         firmware_model = FirmwareStateModel.fit(
@@ -299,6 +312,12 @@ def train_hybrid_compensator(
             np.asarray(stop_qd, dtype=np.float64),
             stop_timestamps,
             speed_threshold=speed_threshold,
+            min_level_gap=firmware_min_level_gap,
+            default_decay_tau_s=firmware_default_decay_tau_s,
+            blend_alpha=firmware_blend_alpha,
+            settle_lambda_threshold=firmware_settle_lambda_threshold,
+            detect_ema_alpha=firmware_detect_ema_alpha,
+            j3_jump_size=firmware_j3_jump_size,
         )
 
     time_since_stop = derive_time_since_stop(qd_arr, timestamps, firmware_model.speed_threshold)
@@ -321,6 +340,7 @@ def train_hybrid_compensator(
         lr=lr,
         hidden_dim=hidden_dim,
         seed=seed,
+        history_steps=history_steps,
     )
 
     final_losses = [joint_losses[-1] if joint_losses else None for joint_losses in losses]
@@ -331,9 +351,18 @@ def train_hybrid_compensator(
         "jump_model": "kinematic_delayed_jump",
         "jump_eval_window_s": [0.0, 1.0],
         "speed_threshold": firmware_model.speed_threshold,
+        "static_alpha": static_model.alpha,
         "static_rmse": static_model.residual_rmse.astype(float).tolist(),
         "motion_final_losses": final_losses,
         "motion_history_steps": motion_model.history_steps,
+        "firmware_fit": {
+            "min_level_gap": float(firmware_min_level_gap),
+            "default_decay_tau_s": float(firmware_default_decay_tau_s),
+            "blend_alpha": firmware_model.blend_alpha,
+            "settle_lambda_threshold": firmware_model.settle_lambda_threshold,
+            "detect_ema_alpha": firmware_model.detect_ema_alpha,
+            "j3_jump_size": firmware_model.j3_jump_size,
+        },
     }
     if embodiment is not None:
         metadata["embodiment"] = embodiment

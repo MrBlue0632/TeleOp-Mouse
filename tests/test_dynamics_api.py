@@ -4,10 +4,34 @@ from pathlib import Path
 from unittest.mock import patch
 
 from dynamics import api
+from dynamics.config import load_config
 from dynamics.main import parse_args, run_cli_args
 
 
 class DynamicsApiTests(unittest.TestCase):
+    def test_load_config_merges_global_defaults_with_robot_config(self):
+        config = load_config(robot="xarm6")
+
+        self.assertEqual(config["robot_name"], "xarm6")
+        self.assertIn("paths", config)
+        self.assertEqual(config["paths"]["trajectory_dir"], "dynamics/calibration/traj")
+        self.assertEqual(config["paths"]["torque_dir"], "dynamics/calibration/torque")
+        self.assertEqual(config["paths"]["compensation_model"], "dynamics/calibration/compensation/compensation.pt")
+        self.assertEqual(config["trajectory"]["kind"], "all")
+        self.assertEqual(config["trajectory"]["workspace_points"], 20)
+        self.assertEqual(config["training"]["model_kind"], "baseline")
+        self.assertEqual(config["training"]["epochs"], 200)
+        self.assertEqual(config["compensation"]["hybrid"]["motion_history_steps"], 3)
+
+    def test_global_config_file_is_self_contained(self):
+        config = load_config("dynamics/config.yaml")
+
+        self.assertEqual(config["robot_name"], "xarm6")
+        self.assertEqual(config["joint_count"], 6)
+        self.assertTrue(str(config["urdf_path"]).endswith("assets/urdf/xarm6/xarm6/xarm6.urdf"))
+        self.assertEqual(config["connection"]["ip"], "192.168.1.199")
+        self.assertEqual(config["payload"]["profile"], "xarm_gripper_g2")
+
     def test_parse_args_accepts_explicit_argv(self):
         args = parse_args(
             [
@@ -71,6 +95,10 @@ class DynamicsApiTests(unittest.TestCase):
             epochs=10,
             lr=0.01,
             hidden_dim=16,
+            seed=None,
+            static_alpha=None,
+            speed_threshold_deg_s=None,
+            motion_history_steps=None,
         )
         config = {"robot_name": "xarm6"}
 
@@ -101,12 +129,57 @@ class DynamicsApiTests(unittest.TestCase):
             epochs=10,
             lr=0.01,
             hidden_dim=16,
+            seed=None,
+            static_alpha=None,
+            speed_threshold_deg_s=None,
+            motion_history_steps=None,
             hz=100.0,
         )
 
     def test_run_mode_rejects_unknown_mode(self):
         with self.assertRaisesRegex(ValueError, "mode must be one of"):
             api.run_mode("unknown", {})
+
+    def test_train_mode_uses_config_defaults_when_arguments_are_omitted(self):
+        config = {
+            "paths": {"compensation_model": "cfg-model.pt"},
+            "training": {
+                "model_kind": "hybrid",
+                "target": "residual",
+                "epochs": 9,
+                "lr": 0.02,
+                "hidden_dim": 33,
+                "seed": 5,
+            },
+            "compensation": {
+                "hybrid": {
+                    "static_alpha": 0.25,
+                    "speed_threshold_deg_s": 3.5,
+                    "motion_history_steps": 2,
+                }
+            },
+        }
+
+        with patch("dynamics.calibration.train.train_from_torque_data", return_value=Path("cfg-model.pt")) as train:
+            result = api.run_mode("train", config, data_path="data.parquet")
+
+        self.assertEqual(result, Path("cfg-model.pt"))
+        train.assert_called_once_with(
+            config,
+            data_path="data.parquet",
+            output_path="cfg-model.pt",
+            model_kind="hybrid",
+            static_data_path=None,
+            stop_data_path=None,
+            target="residual",
+            epochs=9,
+            lr=0.02,
+            hidden_dim=33,
+            seed=5,
+            static_alpha=0.25,
+            speed_threshold_deg_s=3.5,
+            motion_history_steps=2,
+        )
 
     def test_api_delegates_workflow_calls_to_main(self):
         args = argparse.Namespace(mode="monitor")

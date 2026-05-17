@@ -11,6 +11,7 @@ import yaml
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+DEFAULT_INPUT_CONFIG_PATH = Path(__file__).resolve().parent / "config.yaml"
 DEFAULT_CONFIG_DIR = Path(__file__).resolve().parent / "config"
 
 
@@ -31,15 +32,26 @@ def default_config_path(robot: str) -> Path:
     return path
 
 
+def _read_yaml(path: Path) -> dict[str, Any]:
+    with open(path, "r", encoding="utf-8") as f:
+        return yaml.safe_load(f) or {}
+
+
 def load_config(path: str | os.PathLike[str] | None = None, *, robot: str = "xarm6", overrides: dict[str, Any] | None = None) -> dict[str, Any]:
+    config: dict[str, Any] = {}
+    defaults_path = DEFAULT_INPUT_CONFIG_PATH
+    if defaults_path.exists():
+        config = deep_update(config, _read_yaml(defaults_path))
+
     config_path = Path(path).expanduser() if path else default_config_path(robot)
-    with open(config_path, "r", encoding="utf-8") as f:
-        config = yaml.safe_load(f) or {}
+    config = deep_update(config, _read_yaml(config_path))
     config = _resolve_paths(config, config_path.parent)
     if overrides:
         config = deep_update(config, overrides)
         config = _resolve_paths(config, config_path.parent)
     config["_config_path"] = str(config_path.resolve())
+    if defaults_path.exists():
+        config["_defaults_path"] = str(defaults_path.resolve())
     return config
 
 

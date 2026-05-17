@@ -1,6 +1,7 @@
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import numpy as np
 
@@ -385,6 +386,58 @@ class CompensationTests(unittest.TestCase):
             )
 
         self.assertEqual(out.name, "model.pt")
+
+    def test_train_from_torque_data_uses_config_training_and_hybrid_defaults(self):
+        class FakeHybridBundle:
+            def save(self, path):
+                return Path(path)
+
+        config = {
+            "joint_count": 2,
+            "paths": {"compensation_model": "cfg-hybrid.pt"},
+            "training": {
+                "model_kind": "hybrid",
+                "target": "residual",
+                "epochs": 3,
+                "lr": 0.04,
+                "hidden_dim": 12,
+                "seed": 19,
+            },
+            "compensation": {
+                "hybrid": {
+                    "static_alpha": 0.2,
+                    "speed_threshold_deg_s": 4.0,
+                    "motion_history_steps": 1,
+                    "min_level_gap_nm": 0.8,
+                    "default_decay_tau_s": 0.45,
+                    "blend_alpha": 0.15,
+                    "settle_lambda_threshold": 0.04,
+                    "detect_ema_alpha": 0.03,
+                    "j3_jump_size_nm": 4.8,
+                }
+            },
+        }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            data_path = write_parquet(self.make_torque_records(joint_count=2), Path(tmp) / "torque.parquet")
+            with patch("dynamics.calibration.train.train_hybrid_compensator", return_value=(FakeHybridBundle(), {})) as train:
+                out = train_from_torque_data(config, data_path=data_path)
+
+        self.assertEqual(out, Path("cfg-hybrid.pt"))
+        kwargs = train.call_args.kwargs
+        self.assertEqual(kwargs["epochs"], 3)
+        self.assertEqual(kwargs["lr"], 0.04)
+        self.assertEqual(kwargs["hidden_dim"], 12)
+        self.assertEqual(kwargs["seed"], 19)
+        self.assertEqual(kwargs["static_alpha"], 0.2)
+        self.assertAlmostEqual(kwargs["speed_threshold"], np.deg2rad(4.0))
+        self.assertEqual(kwargs["history_steps"], 1)
+        self.assertEqual(kwargs["firmware_min_level_gap"], 0.8)
+        self.assertEqual(kwargs["firmware_default_decay_tau_s"], 0.45)
+        self.assertEqual(kwargs["firmware_blend_alpha"], 0.15)
+        self.assertEqual(kwargs["firmware_settle_lambda_threshold"], 0.04)
+        self.assertEqual(kwargs["firmware_detect_ema_alpha"], 0.03)
+        self.assertEqual(kwargs["firmware_j3_jump_size"], 4.8)
 
     def test_validation_reports_component_and_stop_window_rmse(self):
         from dynamics.calibration.validation import evaluate_torque_breakdown

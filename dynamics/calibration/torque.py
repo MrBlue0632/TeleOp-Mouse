@@ -61,12 +61,16 @@ def collect_torque_data(
     config: dict,
     *,
     traj_path: str | Path | Sequence[str | Path] | None = None,
+    traj_dir: str | Path = "dynamics/calibration/traj",
     output_dir: str | Path = "dynamics/calibration/torque",
     model_path: str | Path | None = None,
 ) -> Path:
     robot_name = str(config.get("robot_name", "robot"))
     joint_count = int(config.get("joint_count", 6))
-    traj_files = resolve_traj_paths(traj_path)
+    traj_files = resolve_traj_paths(traj_path, traj_dir=traj_dir)
+    torque_cfg = config.get("torque", {})
+    if not isinstance(torque_cfg, dict):
+        torque_cfg = {}
 
     robot = resolve_robot(config["urdf_path"], name=robot_name, payload=config.get("payload"))
     if model_path:
@@ -93,8 +97,8 @@ def collect_torque_data(
                     kwargs={
                         "q_traj_rad": q_traj,
                         "timestamps": timestamps,
-                        "speed_deg_s": float(config.get("replay_speed_deg_s", 30)),
-                        "acc_deg_s2": float(config.get("replay_acc_deg_s2", 200)),
+                        "speed_deg_s": float(torque_cfg.get("replay_speed_deg_s", config.get("replay_speed_deg_s", 30))),
+                        "acc_deg_s2": float(torque_cfg.get("replay_acc_deg_s2", config.get("replay_acc_deg_s2", 200))),
                     },
                     daemon=True,
                 )

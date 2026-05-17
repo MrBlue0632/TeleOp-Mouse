@@ -38,6 +38,26 @@ config = load_dynamics_config(robot="xarm6")
 run_mode("traj", config, duration_s=10.0)
 ```
 
+## Configuration Inputs
+
+`dynamics/config.yaml` is the complete default input sheet for the current dynamics pipeline. Robot-specific files such as `dynamics/config/xarm6.yaml` are loaded on top of it, and CLI/API arguments override both.
+
+The config is grouped by responsibility:
+
+| Section | Inputs |
+| --- | --- |
+| Robot identity | `robot_name`, `embodiment_id`, `sdk_backend`, `urdf_path`, `joint_count`, `home_joints_deg`, `gripper_open` |
+| Connection | `connection.ip`, `connection.robot_port`, report ports, SDK timeout |
+| Payload | `payload.enabled`, `payload.profile`, `payload.mode` |
+| Paths | trajectory output dir, torque output dir, compensation checkpoint path |
+| Trajectory | sample rate, mode, duration, teach sensitivity, workspace point count, margin, speed cap, seed |
+| Torque replay | trajectory path override, optional compensation model path, replay speed/acceleration |
+| Training | data paths, model kind, target, epochs, learning rate, hidden width, seed |
+| Hybrid compensation | static ridge alpha, stop speed threshold, motion history window, delayed-jump fitting constants |
+| Monitor | optional compensation model path |
+
+Python functions keep fallback defaults so direct module calls remain usable, but normal workflow defaults should be changed in `dynamics/config.yaml`.
+
 `main.py` owns the workflow orchestration:
 
 ```text
@@ -62,6 +82,8 @@ Common options:
 | `--model-path` | Compensation checkpoint path |
 | `--traj-kind` | Trajectory submode: `drag`, `workspace`, or default `all` |
 | `--traj` | Trajectory parquet for torque mode; repeat to replay multiple files |
+| `--epochs`, `--lr`, `--hidden-dim`, `--seed` | Training overrides |
+| `--static-alpha`, `--speed-threshold-deg-s`, `--motion-history-steps` | Hybrid compensation overrides |
 
 ## Typical Workflow
 

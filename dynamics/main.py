@@ -37,23 +37,39 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--hz", type=float, help="sampling frequency override")
     parser.add_argument("--duration-s", type=float, help="record duration; omit to stop with Ctrl+C")
     parser.add_argument("--teach-sensitivity", type=int, help="xArm teach sensitivity 1-5")
-    parser.add_argument("--traj-kind", choices=TRAJ_KINDS, default="all", help="trajectory recording submode")
-    parser.add_argument("--workspace-points", type=int, default=20, help="random workspace waypoint count")
-    parser.add_argument("--workspace-margin-ratio", type=float, default=0.05, help="workspace joint-bound shrink ratio")
-    parser.add_argument("--workspace-speed-deg-s", type=float, default=30.0, help="generated workspace trajectory speed cap")
-    parser.add_argument("--workspace-seed", type=int, default=7, help="random seed for workspace trajectory generation")
+    parser.add_argument("--traj-kind", choices=TRAJ_KINDS, help="trajectory recording submode")
+    parser.add_argument("--workspace-points", type=int, help="random workspace waypoint count")
+    parser.add_argument("--workspace-margin-ratio", type=float, help="workspace joint-bound shrink ratio")
+    parser.add_argument("--workspace-speed-deg-s", type=float, help="generated workspace trajectory speed cap")
+    parser.add_argument("--workspace-seed", type=int, help="random seed for workspace trajectory generation")
     parser.add_argument("--traj", action="append", help="trajectory parquet for torque mode; repeat for multiple files")
     parser.add_argument("--data", help="torque parquet for train mode")
     parser.add_argument("--static-data", help="optional static-pose parquet for hybrid train mode")
     parser.add_argument("--stop-data", help="optional stop-event parquet for hybrid train mode")
     parser.add_argument("--output-dir", help="output directory for traj/torque modes")
     parser.add_argument("--model-path", help="compensation model checkpoint path")
-    parser.add_argument("--model-kind", choices=["baseline", "hybrid"], default="baseline")
-    parser.add_argument("--epochs", type=int, default=200)
-    parser.add_argument("--lr", type=float, default=1e-3)
-    parser.add_argument("--hidden-dim", type=int, default=64)
-    parser.add_argument("--target", choices=["residual", "direct_api"], default="residual")
+    parser.add_argument("--model-kind", choices=["baseline", "hybrid"])
+    parser.add_argument("--epochs", type=int)
+    parser.add_argument("--lr", type=float)
+    parser.add_argument("--hidden-dim", type=int)
+    parser.add_argument("--seed", type=int)
+    parser.add_argument("--static-alpha", type=float)
+    parser.add_argument("--speed-threshold-deg-s", type=float)
+    parser.add_argument("--motion-history-steps", type=int)
+    parser.add_argument("--target", choices=["residual", "direct_api"])
     return parser.parse_args(argv)
+
+
+def _section(config: dict, name: str) -> dict:
+    value = config.get(name, {})
+    return value if isinstance(value, dict) else {}
+
+
+def _coalesce(*values):
+    for value in values:
+        if value is not None:
+            return value
+    return None
 
 
 def run_mode(
@@ -64,37 +80,49 @@ def run_mode(
     duration_s: float | None = None,
     teach_sensitivity: int | None = None,
     traj_path: str | Path | Sequence[str | Path] | None = None,
-    traj_kind: str = "all",
-    workspace_points: int = 20,
-    workspace_margin_ratio: float = 0.05,
-    workspace_speed_deg_s: float = 30.0,
-    workspace_seed: int = 7,
+    traj_kind: str | None = None,
+    workspace_points: int | None = None,
+    workspace_margin_ratio: float | None = None,
+    workspace_speed_deg_s: float | None = None,
+    workspace_seed: int | None = None,
     data_path: str | Path | None = None,
     static_data_path: str | Path | None = None,
     stop_data_path: str | Path | None = None,
     model_path: str | Path | None = None,
-    model_kind: str = "baseline",
-    target: str = "residual",
-    epochs: int = 200,
-    lr: float = 1e-3,
-    hidden_dim: int = 64,
+    model_kind: str | None = None,
+    target: str | None = None,
+    epochs: int | None = None,
+    lr: float | None = None,
+    hidden_dim: int | None = None,
+    seed: int | None = None,
+    static_alpha: float | None = None,
+    speed_threshold_deg_s: float | None = None,
+    motion_history_steps: int | None = None,
     hz: float | None = None,
 ) -> Path | list[Path] | None:
     """Run one dynamics workflow mode from a loaded config."""
+    paths = _section(config, "paths")
+    trajectory_cfg = _section(config, "trajectory")
+    torque_cfg = _section(config, "torque")
+    training_cfg = _section(config, "training")
+    compensation_cfg = _section(config, "compensation")
+    hybrid_cfg = _section(compensation_cfg, "hybrid")
+    monitor_cfg = _section(config, "monitor")
+
     if mode == "traj":
         from .calibration.record import record_trajectories
 
         return record_trajectories(
             config,
-            output_dir=output_dir or DEFAULT_TRAJ_DIR,
-            duration_s=duration_s,
-            hz=hz,
-            teach_sensitivity=teach_sensitivity,
-            traj_kind=traj_kind,
-            workspace_points=workspace_points,
-            workspace_margin_ratio=workspace_margin_ratio,
-            workspace_speed_deg_s=workspace_speed_deg_s,
-            workspace_seed=workspace_seed,
+            output_dir=_coalesce(output_dir, paths.get("trajectory_dir"), DEFAULT_TRAJ_DIR),
+            duration_s=_coalesce(duration_s, trajectory_cfg.get("duration_s")),
+            hz=_coalesce(hz, config.get("sampling_hz")),
+            teach_sensitivity=_coalesce(teach_sensitivity, trajectory_cfg.get("teach_sensitivity")),
+            traj_kind=_coalesce(traj_kind, trajectory_cfg.get("kind"), "all"),
+            workspace_points=int(_coalesce(workspace_points, trajectory_cfg.get("workspace_points"), 20)),
+            workspace_margin_ratio=float(_coalesce(workspace_margin_ratio, trajectory_cfg.get("workspace_margin_ratio"), 0.05)),
+            workspace_speed_deg_s=float(_coalesce(workspace_speed_deg_s, trajectory_cfg.get("workspace_speed_deg_s"), 30.0)),
+            workspace_seed=int(_coalesce(workspace_seed, trajectory_cfg.get("workspace_seed"), 7)),
         )
 
     if mode == "torque":
@@ -102,9 +130,10 @@ def run_mode(
 
         return collect_torque_data(
             config,
-            traj_path=traj_path,
-            output_dir=output_dir or DEFAULT_TORQUE_DIR,
-            model_path=model_path,
+            traj_path=_coalesce(traj_path, torque_cfg.get("traj_path")),
+            traj_dir=_coalesce(paths.get("trajectory_dir"), DEFAULT_TRAJ_DIR),
+            output_dir=_coalesce(output_dir, paths.get("torque_dir"), DEFAULT_TORQUE_DIR),
+            model_path=_coalesce(model_path, torque_cfg.get("model_path")),
         )
 
     if mode == "train":
@@ -112,21 +141,29 @@ def run_mode(
 
         return train_from_torque_data(
             config,
-            data_path=data_path,
-            output_path=model_path or DEFAULT_COMPENSATION_PATH,
-            model_kind=model_kind,
-            static_data_path=static_data_path,
-            stop_data_path=stop_data_path,
-            target=target,
-            epochs=epochs,
-            lr=lr,
-            hidden_dim=hidden_dim,
+            data_path=_coalesce(data_path, training_cfg.get("data_path")),
+            output_path=_coalesce(model_path, paths.get("compensation_model"), DEFAULT_COMPENSATION_PATH),
+            model_kind=_coalesce(model_kind, training_cfg.get("model_kind"), "baseline"),
+            static_data_path=_coalesce(static_data_path, training_cfg.get("static_data_path")),
+            stop_data_path=_coalesce(stop_data_path, training_cfg.get("stop_data_path")),
+            target=_coalesce(target, training_cfg.get("target"), "residual"),
+            epochs=int(_coalesce(epochs, training_cfg.get("epochs"), 200)),
+            lr=float(_coalesce(lr, training_cfg.get("lr"), 1e-3)),
+            hidden_dim=int(_coalesce(hidden_dim, training_cfg.get("hidden_dim"), 64)),
+            seed=int(_coalesce(seed, training_cfg.get("seed"), 7)),
+            static_alpha=float(_coalesce(static_alpha, hybrid_cfg.get("static_alpha"), 1.0)),
+            speed_threshold_deg_s=float(_coalesce(speed_threshold_deg_s, hybrid_cfg.get("speed_threshold_deg_s"), 2.0)),
+            motion_history_steps=int(_coalesce(motion_history_steps, hybrid_cfg.get("motion_history_steps"), 3)),
         )
 
     if mode == "monitor":
         from .calibration.monitor import monitor
 
-        monitor(config, model_path=model_path, hz=hz)
+        monitor(
+            config,
+            model_path=_coalesce(model_path, monitor_cfg.get("model_path")),
+            hz=_coalesce(hz, config.get("sampling_hz")),
+        )
         return None
 
     raise ValueError(f"mode must be one of {', '.join(MODES)}")
@@ -160,6 +197,10 @@ def run_cli_args(args: argparse.Namespace) -> Path | list[Path] | None:
         epochs=args.epochs,
         lr=args.lr,
         hidden_dim=args.hidden_dim,
+        seed=getattr(args, "seed", None),
+        static_alpha=getattr(args, "static_alpha", None),
+        speed_threshold_deg_s=getattr(args, "speed_threshold_deg_s", None),
+        motion_history_steps=getattr(args, "motion_history_steps", None),
         hz=args.hz,
     )
 

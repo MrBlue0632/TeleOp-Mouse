@@ -62,6 +62,10 @@ class FirmwareStateModel:
         speed_threshold: float = np.deg2rad(2.0),
         min_level_gap: float = 1.0,
         default_decay_tau_s: float = 0.35,
+        blend_alpha: float = 0.2,
+        settle_lambda_threshold: float = 0.05,
+        detect_ema_alpha: float = 0.05,
+        j3_jump_size: float = 5.28,
     ) -> "FirmwareStateModel":
         residual_arr = np.asarray(residual, dtype=np.float64)
         qd_arr = np.asarray(qd, dtype=np.float64)
@@ -117,6 +121,10 @@ class FirmwareStateModel:
             direction_levels=direction_levels,
             delay_s=delay,
             speed_threshold=float(speed_threshold),
+            blend_alpha=float(blend_alpha),
+            settle_lambda_threshold=float(settle_lambda_threshold),
+            detect_ema_alpha=float(detect_ema_alpha),
+            j3_jump_size=float(j3_jump_size),
         )
 
     def nearest_level(self, joint: int, value: float) -> float:
