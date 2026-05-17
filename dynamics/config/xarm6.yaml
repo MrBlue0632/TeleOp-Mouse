@@ -1,5 +1,5 @@
 robot_name: xarm6
-embodiment_id: xarm6_g2_metadata_only
+embodiment_id: xarm6_g2_augmented_urdf
 sdk_backend: xarm
 urdf_path: assets/urdf/xarm6/xarm6/xarm6.urdf
 joint_count: 6
@@ -18,4 +18,4 @@ connection:
 payload:
   enabled: true
   profile: xarm_gripper_g2
-  mode: metadata_only
+  mode: augment_urdf

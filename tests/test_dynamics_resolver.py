@@ -20,7 +20,7 @@ class ResolverTests(unittest.TestCase):
         self.assertEqual(robot.joint_names, ["joint1", "joint2", "joint3", "joint4", "joint5", "joint6"])
         self.assertIsNotNone(robot.payload)
         self.assertEqual(robot.payload.name, "xarm_gripper_g2")
-        self.assertFalse(robot.payload.apply_to_model)
+        self.assertTrue(robot.payload.apply_to_model)
         np.testing.assert_allclose(robot.payload.com_xyz_m, [0.12, -0.04, 0.158])
 
     def test_can_write_augmented_payload_urdf_when_requested(self):

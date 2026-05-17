@@ -119,13 +119,15 @@ class CompensationTests(unittest.TestCase):
         config = load_config(robot="xarm6")
         metadata = build_embodiment_metadata(config)
 
-        self.assertEqual(metadata["id"], "xarm6_g2_metadata_only")
+        self.assertEqual(metadata["id"], "xarm6_g2_augmented_urdf")
         self.assertEqual(metadata["robot_name"], "xarm6")
         self.assertEqual(metadata["joint_count"], 6)
         self.assertEqual(metadata["joint_names"], ["joint1", "joint2", "joint3", "joint4", "joint5", "joint6"])
         self.assertEqual(len(metadata["urdf_sha256"]), 64)
         self.assertEqual(metadata["units"]["q"], "rad")
         self.assertEqual(metadata["payload"]["profile"], "xarm_gripper_g2")
+        self.assertEqual(metadata["payload"]["mode"], "augment_urdf")
+        self.assertTrue(metadata["payload"]["apply_to_model"])
 
     def test_train_from_torque_data_writes_baseline_embodiment_metadata(self):
         import torch
@@ -143,7 +145,7 @@ class CompensationTests(unittest.TestCase):
             checkpoint = torch.load(out, map_location="cpu", weights_only=False)
 
         embodiment = checkpoint["extra"]["embodiment"]
-        self.assertEqual(embodiment["id"], "xarm6_g2_metadata_only")
+        self.assertEqual(embodiment["id"], "xarm6_g2_augmented_urdf")
         self.assertEqual(embodiment["joint_count"], 6)
 
     def test_config_aware_loader_rejects_mismatched_hybrid_embodiment(self):
@@ -176,7 +178,7 @@ class CompensationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             path = bundle.save(Path(tmp) / "hybrid.pt")
             loaded = load_compensation_for_config(path, config)
-            self.assertEqual(loaded.metadata["embodiment"]["id"], "xarm6_g2_metadata_only")
+            self.assertEqual(loaded.metadata["embodiment"]["id"], "xarm6_g2_augmented_urdf")
 
             checkpoint = torch.load(path, map_location="cpu", weights_only=False)
             checkpoint["metadata"]["embodiment"]["urdf_sha256"] = "0" * 64
