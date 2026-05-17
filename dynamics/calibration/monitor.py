@@ -12,7 +12,7 @@ from dynamics.backends import create_backend
 from dynamics.model import TheoreticalModel
 from dynamics.resolver import resolve_robot
 
-from .compensation import load_compensation
+from .compensation import load_compensation_for_config
 from .io import LowLatencyDifferentiator
 from .runtime import estimate_torque_sample
 
@@ -33,7 +33,7 @@ def monitor(
     sample_hz = float(hz or config.get("sampling_hz", 100))
     dt = 1.0 / sample_hz
     robot = resolve_robot(config["urdf_path"], name=robot_name, payload=config.get("payload"))
-    comp = load_compensation(model_path) if model_path else None
+    comp = load_compensation_for_config(model_path, config) if model_path else None
     backend = create_backend(config)
     diff = LowLatencyDifferentiator(joint_count)
 

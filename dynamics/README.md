@@ -9,6 +9,7 @@ The current implementation is mainly built around xArm6.
 - Builds a PyBullet-based theoretical rigid-body dynamics model.
 - Connects to the real xArm through the xArm SDK backend.
 - Records hand-guided joint trajectories in teach mode.
+- Generates bounded random workspace trajectories from hand-guided workspace samples.
 - Replays trajectories and logs measured/API torque against theoretical torque.
 - Trains torque compensation models from logged data.
 - Runs a real-time torque monitor with optional compensation.
@@ -59,24 +60,44 @@ Common options:
 | `--urdf` | Override URDF path |
 | `--hz` | Override sampling rate |
 | `--model-path` | Compensation checkpoint path |
+| `--traj-kind` | Trajectory submode: `drag`, `workspace`, or default `all` |
+| `--traj` | Trajectory parquet for torque mode; repeat to replay multiple files |
 
 ## Typical Workflow
 
-1. Record a teach-mode trajectory:
+1. Record trajectories:
 
 ```bash
 python -m dynamics.main --mode traj --robot xarm6 --ip 192.168.1.199
 ```
 
-Output: a parquet file under `dynamics/calibration/traj/`.
+Output: by default two parquet files under `dynamics/calibration/traj/`:
 
-2. Replay the trajectory and collect torque data:
+- `*_traj_drag_*.parquet`: the direct hand-guided trajectory.
+- `*_traj_workspace_*.parquet`: a random joint-space trajectory generated inside the sampled safe workspace.
+
+To run only one trajectory submode:
 
 ```bash
-python -m dynamics.main --mode torque --traj dynamics/calibration/traj/example.parquet
+python -m dynamics.main --mode traj --traj-kind drag
+python -m dynamics.main --mode traj --traj-kind workspace
 ```
 
-Output: a parquet file under `dynamics/calibration/torque/`.
+2. Replay the trajectories and collect torque data:
+
+```bash
+python -m dynamics.main --mode torque
+```
+
+Without `--traj`, torque mode replays the latest `drag` and `workspace` trajectory pair. To choose explicit files:
+
+```bash
+python -m dynamics.main --mode torque \
+  --traj dynamics/calibration/traj/xarm6_traj_drag_example.parquet \
+  --traj dynamics/calibration/traj/xarm6_traj_workspace_example.parquet
+```
+
+Output: one parquet file under `dynamics/calibration/torque/`, with `source_file` marking which trajectory produced each row.
 
 3. Train a baseline compensation model:
 
@@ -107,6 +128,7 @@ Output: live terminal values for joint state, API torque, model torque, compensa
 | `config.py` | Load YAML config and CLI overrides | Config path, robot name, overrides | `dict` config |
 | `resolver.py` | Parse URDF and payload metadata | URDF path, payload config | `ResolvedRobot` |
 | `model.py` | Theoretical dynamics through PyBullet | `ResolvedRobot`, `q/qd/qdd` | mass matrix, gravity, Coriolis, inverse dynamics, estimated torque |
+| `embodiment.py` | Build and check robot/checkpoint fingerprints | Dynamics config, resolved robot | Embodiment metadata and mismatch errors |
 | `backends/base.py` | Robot backend interface | None | `RobotSample`, `RobotBackend` protocol |
 | `backends/xarm.py` | xArm SDK backend | xArm connection config | Samples, teach mode, trajectory replay |
 | `backends/registry.py` | Backend factory | Config or robot name | Robot backend instance |
@@ -117,21 +139,31 @@ Output: live terminal values for joint state, API torque, model torque, compensa
 | --- | --- | --- | --- |
 | `calibration/io.py` | Parquet I/O and online differentiation | Records, DataFrame, `q/qd` | parquet files, matrices, `qd/qdd` |
 | `calibration/runtime.py` | Shared per-sample torque estimation | `RobotSample`, model, optional compensator | Torque estimate fields |
-| `calibration/record.py` | Record teach-mode trajectory | Config, duration, Hz | Trajectory parquet path |
-| `calibration/torque.py` | Replay trajectory and log torque | Config, trajectory parquet, optional model | Torque parquet path |
+| `calibration/record.py` | Record drag/workspace trajectory modes | Config, duration, Hz, trajectory kind | One or more trajectory parquet paths |
+| `calibration/workspace.py` | Estimate sampled joint bounds and generate speed-limited random workspace trajectories | Sampled `q`, point count, speed cap | Generated `q` trajectory and timestamps |
+| `calibration/torque.py` | Replay one or more trajectories and log torque | Config, trajectory parquet paths, optional model | Torque parquet path |
 | `calibration/train.py` | Train compensation checkpoint | Torque parquet, training args | `.pt` model path |
 | `calibration/monitor.py` | Real-time torque monitor | Config, optional model path | Terminal stream |
+| `calibration/validation.py` | Compare staged compensation terms | `tau_api`, `tau_model`, component predictions | RMSE metrics by segment |
 
 ## Compensation Models
 
 | File | Purpose | Main Input | Main Output |
 | --- | --- | --- | --- |
-| `calibration/compensation/mlp.py` | Baseline MLP compensation | `q`, `qd`, `qdd`, `tau_api`, `tau_theory` | `CompensationBundle`, `.pt` |
+| `calibration/compensation/mlp.py` | Baseline MLP compensation | `q`, `qd`, `qdd`, `tau_api`, `tau_model` | `CompensationBundle`, `.pt` |
 | `calibration/compensation/hybrid.py` | Hybrid compensation model | Motion/static/stop torque data | `HybridTorqueCompensator`, `.pt` |
 | `calibration/compensation/static_bias.py` | Position-dependent static bias | Static `q`, residual torque | Static bias prediction |
-| `calibration/compensation/firmware_state.py` | Firmware/current-bias state tracker | Residual, velocity, timestamps | Firmware bias and stop-state estimates |
-| `calibration/compensation/per_joint_mlp.py` | Per-joint motion residual MLPs | Motion features and targets | Motion compensation prediction |
+| `calibration/compensation/firmware_state.py` | Delayed jump state and fitted levels | Residuals for fitting, kinematics for runtime | Jump bias and stop-state estimates |
+| `calibration/compensation/per_joint_mlp.py` | Per-joint motion residual MLPs | Current and historical `q/qd/qdd` features | Motion compensation prediction |
 | `calibration/compensation/__init__.py` | Unified checkpoint loader | `.pt` path | Baseline or hybrid model |
+
+Hybrid checkpoints are trained to predict `tau_api - tau_model` from no-force data. At runtime the prediction path uses only `q`, `qd`, `qdd`, timestamps, and short kinematic history; `tau_api` is used only to compute the final residual:
+
+```text
+tau_external = tau_api - (tau_model + tau_static + tau_motion + tau_jump_delay)
+```
+
+Compensation checkpoints saved through the training workflow include an `embodiment` fingerprint with robot name, active joint names, URDF hash, payload profile, and SI-unit conventions. Runtime torque collection and monitoring load checkpoints through the config-aware loader, so a checkpoint trained for another embodiment is rejected before use.
 
 ## Data Columns
 
@@ -140,6 +172,7 @@ Trajectory records usually contain:
 - `timestamp`
 - `robot`
 - `mode`
+- `traj_kind`
 - `q_1 ... q_N`
 - `qd_1 ... qd_N`
 - `qdd_1 ... qdd_N`
@@ -147,6 +180,7 @@ Trajectory records usually contain:
 Torque records add:
 
 - `tau_api_1 ... tau_api_N`
+- `tau_model_1 ... tau_model_N`
 - `tau_theory_1 ... tau_theory_N`
 - `tau_comp_1 ... tau_comp_N`
 - `tau_error_1 ... tau_error_N`

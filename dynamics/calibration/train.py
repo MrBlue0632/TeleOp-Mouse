@@ -4,6 +4,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from dynamics.embodiment import build_embodiment_metadata
+from dynamics.resolver import resolve_robot
+
 from .compensation.hybrid import train_hybrid_compensator
 from .compensation.mlp import save_compensation, train_compensation
 from .io import extract_matrix, latest_parquet, read_parquet
@@ -20,6 +23,25 @@ def resolve_torque_path(path: str | Path | None, torque_dir: str | Path = "dynam
     if not out.exists():
         raise FileNotFoundError(f"torque file not found: {out}")
     return out
+
+
+def extract_tau_model(df, joint_count: int):
+    """Read unified tau_model columns, falling back to legacy tau_theory."""
+    try:
+        return extract_matrix(df, "tau_model", joint_count)
+    except KeyError:
+        return extract_matrix(df, "tau_theory", joint_count)
+
+
+def _embodiment_from_config(config: dict):
+    if "urdf_path" not in config:
+        return None
+    robot = resolve_robot(
+        config["urdf_path"],
+        name=str(config.get("robot_name", "robot")),
+        payload=config.get("payload"),
+    )
+    return build_embodiment_metadata(config, robot)
 
 
 def train_from_torque_data(
@@ -42,8 +64,9 @@ def train_from_torque_data(
     qd = extract_matrix(df, "qd", joint_count)
     qdd = extract_matrix(df, "qdd", joint_count)
     tau_api = extract_matrix(df, "tau_api", joint_count)
-    tau_theory = extract_matrix(df, "tau_theory", joint_count)
+    tau_theory = extract_tau_model(df, joint_count)
     timestamps = df["timestamp"].to_numpy(dtype=float) if "timestamp" in df else None
+    embodiment = _embodiment_from_config(config)
 
     if model_kind == "hybrid":
         static_kwargs = {}
@@ -52,7 +75,7 @@ def train_from_torque_data(
             static_kwargs = {
                 "static_q": extract_matrix(static_df, "q", joint_count),
                 "static_tau_api": extract_matrix(static_df, "tau_api", joint_count),
-                "static_tau_model": extract_matrix(static_df, "tau_theory", joint_count),
+                "static_tau_model": extract_tau_model(static_df, joint_count),
             }
         stop_kwargs = {}
         if stop_data_path:
@@ -61,7 +84,7 @@ def train_from_torque_data(
                 "stop_q": extract_matrix(stop_df, "q", joint_count),
                 "stop_qd": extract_matrix(stop_df, "qd", joint_count),
                 "stop_tau_api": extract_matrix(stop_df, "tau_api", joint_count),
-                "stop_tau_model": extract_matrix(stop_df, "tau_theory", joint_count),
+                "stop_tau_model": extract_tau_model(stop_df, joint_count),
                 "stop_timestamps": stop_df["timestamp"].to_numpy(dtype=float) if "timestamp" in stop_df else None,
             }
         bundle, metadata = train_hybrid_compensator(
@@ -74,6 +97,7 @@ def train_from_torque_data(
             epochs=epochs,
             lr=lr,
             hidden_dim=hidden_dim,
+            embodiment=embodiment,
             **static_kwargs,
             **stop_kwargs,
         )
@@ -98,7 +122,11 @@ def train_from_torque_data(
     path = save_compensation(
         bundle,
         output_path,
-        extra={"source_file": str(torque_file), "final_loss": losses[-1] if losses else None},
+        extra={
+            "source_file": str(torque_file),
+            "final_loss": losses[-1] if losses else None,
+            **({"embodiment": embodiment} if embodiment is not None else {}),
+        },
     )
     print(f"[TRAIN] saved compensation model to {path}; final_loss={losses[-1]:.6f}")
     return path

@@ -20,6 +20,7 @@ DEFAULT_TRAJ_DIR = Path("dynamics/calibration/traj")
 DEFAULT_TORQUE_DIR = Path("dynamics/calibration/torque")
 DEFAULT_COMPENSATION_PATH = Path("dynamics/calibration/compensation/compensation.pt")
 MODES = ("traj", "torque", "train", "monitor")
+TRAJ_KINDS = ("drag", "workspace", "all")
 
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
@@ -36,7 +37,12 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--hz", type=float, help="sampling frequency override")
     parser.add_argument("--duration-s", type=float, help="record duration; omit to stop with Ctrl+C")
     parser.add_argument("--teach-sensitivity", type=int, help="xArm teach sensitivity 1-5")
-    parser.add_argument("--traj", help="trajectory parquet for torque mode")
+    parser.add_argument("--traj-kind", choices=TRAJ_KINDS, default="all", help="trajectory recording submode")
+    parser.add_argument("--workspace-points", type=int, default=20, help="random workspace waypoint count")
+    parser.add_argument("--workspace-margin-ratio", type=float, default=0.05, help="workspace joint-bound shrink ratio")
+    parser.add_argument("--workspace-speed-deg-s", type=float, default=30.0, help="generated workspace trajectory speed cap")
+    parser.add_argument("--workspace-seed", type=int, default=7, help="random seed for workspace trajectory generation")
+    parser.add_argument("--traj", action="append", help="trajectory parquet for torque mode; repeat for multiple files")
     parser.add_argument("--data", help="torque parquet for train mode")
     parser.add_argument("--static-data", help="optional static-pose parquet for hybrid train mode")
     parser.add_argument("--stop-data", help="optional stop-event parquet for hybrid train mode")
@@ -57,7 +63,12 @@ def run_mode(
     output_dir: str | Path | None = None,
     duration_s: float | None = None,
     teach_sensitivity: int | None = None,
-    traj_path: str | Path | None = None,
+    traj_path: str | Path | Sequence[str | Path] | None = None,
+    traj_kind: str = "all",
+    workspace_points: int = 20,
+    workspace_margin_ratio: float = 0.05,
+    workspace_speed_deg_s: float = 30.0,
+    workspace_seed: int = 7,
     data_path: str | Path | None = None,
     static_data_path: str | Path | None = None,
     stop_data_path: str | Path | None = None,
@@ -68,17 +79,22 @@ def run_mode(
     lr: float = 1e-3,
     hidden_dim: int = 64,
     hz: float | None = None,
-) -> Path | None:
+) -> Path | list[Path] | None:
     """Run one dynamics workflow mode from a loaded config."""
     if mode == "traj":
-        from .calibration.record import record_trajectory
+        from .calibration.record import record_trajectories
 
-        return record_trajectory(
+        return record_trajectories(
             config,
             output_dir=output_dir or DEFAULT_TRAJ_DIR,
             duration_s=duration_s,
             hz=hz,
             teach_sensitivity=teach_sensitivity,
+            traj_kind=traj_kind,
+            workspace_points=workspace_points,
+            workspace_margin_ratio=workspace_margin_ratio,
+            workspace_speed_deg_s=workspace_speed_deg_s,
+            workspace_seed=workspace_seed,
         )
 
     if mode == "torque":
@@ -116,7 +132,7 @@ def run_mode(
     raise ValueError(f"mode must be one of {', '.join(MODES)}")
 
 
-def run_cli_args(args: argparse.Namespace) -> Path | None:
+def run_cli_args(args: argparse.Namespace) -> Path | list[Path] | None:
     """Load config from CLI args and dispatch to the selected workflow mode."""
     config = load_config(
         args.config,
@@ -130,6 +146,11 @@ def run_cli_args(args: argparse.Namespace) -> Path | None:
         duration_s=args.duration_s,
         teach_sensitivity=args.teach_sensitivity,
         traj_path=args.traj,
+        traj_kind=args.traj_kind,
+        workspace_points=args.workspace_points,
+        workspace_margin_ratio=args.workspace_margin_ratio,
+        workspace_speed_deg_s=args.workspace_speed_deg_s,
+        workspace_seed=args.workspace_seed,
         data_path=args.data,
         static_data_path=args.static_data,
         stop_data_path=args.stop_data,

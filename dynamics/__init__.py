@@ -1,5 +1,6 @@
 """Standalone robot dynamics and calibration tools."""
 
+from .embodiment import EmbodimentMismatchError, assert_embodiment_matches, build_embodiment_metadata
 from .resolver import PayloadSpec, ResolvedJoint, ResolvedLink, ResolvedRobot, resolve_robot
 
 _API_EXPORTS = {
@@ -7,6 +8,7 @@ _API_EXPORTS = {
     "DEFAULT_TORQUE_DIR",
     "DEFAULT_TRAJ_DIR",
     "MODES",
+    "TRAJ_KINDS",
     "build_theoretical_model",
     "load_dynamics_config",
     "resolve_robot_from_config",
@@ -28,10 +30,14 @@ __all__ = [
     "DEFAULT_TORQUE_DIR",
     "DEFAULT_TRAJ_DIR",
     "MODES",
+    "TRAJ_KINDS",
     "PayloadSpec",
     "ResolvedJoint",
     "ResolvedLink",
     "ResolvedRobot",
+    "EmbodimentMismatchError",
+    "assert_embodiment_matches",
+    "build_embodiment_metadata",
     "build_theoretical_model",
     "load_dynamics_config",
     "resolve_robot_from_config",

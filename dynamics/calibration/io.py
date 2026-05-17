@@ -15,6 +15,7 @@ ARRAY_PREFIXES = (
     "qd",
     "qdd",
     "tau_api",
+    "tau_model",
     "tau_theory",
     "tau_comp",
     "tau_error",
@@ -88,6 +89,7 @@ def make_record(
     qd: np.ndarray | None = None,
     qdd: np.ndarray | None = None,
     tau_api: np.ndarray | None = None,
+    tau_model: np.ndarray | None = None,
     tau_theory: np.ndarray | None = None,
     tau_comp: np.ndarray | None = None,
     tau_error: np.ndarray | None = None,
@@ -101,6 +103,7 @@ def make_record(
     is_moving: bool | None = None,
     stop_event_id: int | None = None,
     source_file: str | None = None,
+    traj_kind: str | None = None,
 ) -> dict:
     row = {
         "timestamp": float(timestamp),
@@ -108,10 +111,15 @@ def make_record(
         "mode": mode,
         "source_file": source_file or "",
     }
+    if traj_kind is not None:
+        row["traj_kind"] = str(traj_kind)
     _put_vector(row, "q", q, joint_count)
     _put_vector(row, "qd", qd, joint_count)
     _put_vector(row, "qdd", qdd, joint_count)
     _put_vector(row, "tau_api", tau_api, joint_count)
+    if tau_model is None:
+        tau_model = tau_theory
+    _put_vector(row, "tau_model", tau_model, joint_count)
     _put_vector(row, "tau_theory", tau_theory, joint_count)
     _put_vector(row, "tau_comp", tau_comp, joint_count)
     _put_vector(row, "tau_error", tau_error, joint_count)

@@ -1,11 +1,12 @@
 robot_name: xarm6
+embodiment_id: xarm6_g2_metadata_only
 sdk_backend: xarm
 urdf_path: assets/urdf/xarm6/xarm6/xarm6.urdf
 joint_count: 6
 home_joints_deg: [14.1, -8.0, -24.7, 196.9, 62.3, -8.8]
 gripper_open: 840.0
 sampling_hz: 100
-replay_speed_deg_s: 20
+replay_speed_deg_s: 30
 replay_acc_deg_s2: 200
 connection:
   ip: 192.168.1.199

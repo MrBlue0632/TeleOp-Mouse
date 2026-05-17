@@ -8,6 +8,7 @@ bias after motion stops.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import inspect
 from pathlib import Path
 from typing import Any
 
@@ -15,8 +16,8 @@ import numpy as np
 import torch
 
 from .firmware_state import (
-    FirmwareBiasTracker,
     FirmwareStateModel,
+    KinematicFirmwareBiasTracker,
     derive_motion_lambda,
     derive_time_since_stop,
 )
@@ -37,6 +38,14 @@ class HybridTorqueEstimate:
     is_moving: np.ndarray
 
 
+def _predict_accepts_history(motion_model: Any) -> bool:
+    try:
+        params = inspect.signature(motion_model.predict).parameters
+    except (TypeError, ValueError):
+        return False
+    return "history_features" in params or any(param.kind == inspect.Parameter.VAR_KEYWORD for param in params.values())
+
+
 class HybridTorqueCompensator:
     """Runtime hybrid compensator with stateful firmware-bias tracking."""
 
@@ -54,7 +63,12 @@ class HybridTorqueCompensator:
         self.firmware_model = firmware_model
         self.motion_model = motion_model
         self.metadata = metadata or {}
-        self.tracker = FirmwareBiasTracker(firmware_model)
+        self.tracker = KinematicFirmwareBiasTracker(firmware_model)
+        self.history_steps = int(getattr(motion_model, "history_steps", 0))
+        self._q_history: list[np.ndarray] = []
+        self._qd_history: list[np.ndarray] = []
+        self._qdd_history: list[np.ndarray] = []
+        self._motion_accepts_history = _predict_accepts_history(motion_model)
 
     @property
     def joint_count(self) -> int:
@@ -62,6 +76,57 @@ class HybridTorqueCompensator:
 
     def reset(self) -> None:
         self.tracker.reset()
+        self._q_history.clear()
+        self._qd_history.clear()
+        self._qdd_history.clear()
+
+    def _history_features_for_current(self) -> np.ndarray:
+        if self.history_steps <= 0:
+            return np.zeros((1, 0), dtype=np.float32)
+        width = self.joint_count * 3
+        out = np.zeros((1, self.history_steps * width), dtype=np.float64)
+        for lag in range(1, self.history_steps + 1):
+            src = len(self._q_history) - lag
+            if src < 0:
+                continue
+            start = (lag - 1) * width
+            out[0, start : start + width] = np.concatenate(
+                [self._q_history[src], self._qd_history[src], self._qdd_history[src]]
+            )
+        return out.astype(np.float32)
+
+    def _remember_history(self, q: np.ndarray, qd: np.ndarray, qdd: np.ndarray) -> None:
+        if self.history_steps <= 0:
+            return
+        self._q_history.append(np.asarray(q, dtype=np.float64).copy())
+        self._qd_history.append(np.asarray(qd, dtype=np.float64).copy())
+        self._qdd_history.append(np.asarray(qdd, dtype=np.float64).copy())
+        max_len = self.history_steps
+        del self._q_history[:-max_len]
+        del self._qd_history[:-max_len]
+        del self._qdd_history[:-max_len]
+
+    def _predict_motion(
+        self,
+        q: np.ndarray,
+        qd: np.ndarray,
+        qdd: np.ndarray,
+        tau_model: np.ndarray,
+        motion_lambda: float,
+        time_since_stop: np.ndarray,
+        history_features: np.ndarray,
+    ) -> np.ndarray:
+        if self._motion_accepts_history:
+            return self.motion_model.predict(
+                q,
+                qd,
+                qdd,
+                tau_model,
+                motion_lambda,
+                time_since_stop,
+                history_features=history_features,
+            )
+        return self.motion_model.predict(q, qd, qdd, tau_model, motion_lambda, time_since_stop)
 
     def update(
         self,
@@ -79,16 +144,18 @@ class HybridTorqueCompensator:
         tau_model_arr = np.asarray(tau_model, dtype=np.float64)[: self.joint_count]
 
         tau_static = self.static_model.predict(q_arr)
-        residual_after_static = tau_api_arr - tau_model_arr - tau_static
-        fw = self.tracker.update(qd_arr, residual_after_static, timestamp=timestamp)
-        tau_motion = self.motion_model.predict(
+        fw = self.tracker.update(q_arr, qd_arr, qdd_arr, timestamp=timestamp)
+        history_features = self._history_features_for_current()
+        tau_motion = self._predict_motion(
             q_arr,
             qd_arr,
             qdd_arr,
             tau_model_arr,
             fw.motion_lambda,
             fw.time_since_stop,
+            history_features,
         )
+        self._remember_history(q_arr, qd_arr, qdd_arr)
         tau_comp = tau_static + fw.bias + tau_motion
         tau_external = tau_api_arr - tau_model_arr - tau_comp
         return HybridTorqueEstimate(
@@ -110,12 +177,29 @@ class HybridTorqueCompensator:
         qdd: np.ndarray,
         tau_theory: np.ndarray | None = None,
     ) -> np.ndarray:
-        """Stateless-ish compatibility API used by the old baseline caller."""
-        tau_model = np.zeros(self.joint_count, dtype=np.float64) if tau_theory is None else np.asarray(tau_theory, dtype=np.float64)
-        tau_static = self.static_model.predict(q)
-        zeros = np.zeros(self.joint_count, dtype=np.float64)
-        tau_motion = self.motion_model.predict(q, qd, qdd, tau_model, 0.0, zeros)
-        return tau_static + tau_motion
+        """Compatibility API used by callers that only need compensation."""
+        tau_model = (
+            np.zeros(self.joint_count, dtype=np.float64)
+            if tau_theory is None
+            else np.asarray(tau_theory, dtype=np.float64)[: self.joint_count]
+        )
+        q_arr = np.asarray(q, dtype=np.float64)[: self.joint_count]
+        qd_arr = np.asarray(qd, dtype=np.float64)[: self.joint_count]
+        qdd_arr = np.asarray(qdd, dtype=np.float64)[: self.joint_count]
+        tau_static = self.static_model.predict(q_arr)
+        fw = self.tracker.update(q_arr, qd_arr, qdd_arr)
+        history_features = self._history_features_for_current()
+        tau_motion = self._predict_motion(
+            q_arr,
+            qd_arr,
+            qdd_arr,
+            tau_model,
+            fw.motion_lambda,
+            fw.time_since_stop,
+            history_features,
+        )
+        self._remember_history(q_arr, qd_arr, qdd_arr)
+        return tau_static + fw.bias + tau_motion
 
     def checkpoint(self) -> dict[str, Any]:
         return {
@@ -172,6 +256,7 @@ def train_hybrid_compensator(
     lr: float = 1e-3,
     hidden_dim: int = 64,
     seed: int = 7,
+    embodiment: dict[str, Any] | None = None,
 ) -> tuple[HybridTorqueCompensator, dict[str, Any]]:
     q_arr = np.asarray(q, dtype=np.float64)
     qd_arr = np.asarray(qd, dtype=np.float64)
@@ -222,7 +307,7 @@ def train_hybrid_compensator(
         speed_threshold=firmware_model.speed_threshold,
         blend_alpha=firmware_model.blend_alpha,
     )
-    firmware_bias = estimate_firmware_bias_sequence(firmware_model, qd_arr, residual_after_static, timestamps)
+    firmware_bias = estimate_firmware_bias_sequence(firmware_model, q_arr, qd_arr, qdd_arr, timestamps)
     motion_target = residual_after_static - firmware_bias
     motion_model, losses = train_per_joint_motion_model(
         q_arr,
@@ -241,10 +326,17 @@ def train_hybrid_compensator(
     final_losses = [joint_losses[-1] if joint_losses else None for joint_losses in losses]
     metadata = {
         "joint_count": joint_count,
+        "target": "tau_api_minus_tau_model",
+        "components": ["static", "motion", "delayed_jump"],
+        "jump_model": "kinematic_delayed_jump",
+        "jump_eval_window_s": [0.0, 1.0],
         "speed_threshold": firmware_model.speed_threshold,
         "static_rmse": static_model.residual_rmse.astype(float).tolist(),
         "motion_final_losses": final_losses,
+        "motion_history_steps": motion_model.history_steps,
     }
+    if embodiment is not None:
+        metadata["embodiment"] = embodiment
     return (
         HybridTorqueCompensator(
             static_model=static_model,
@@ -258,18 +350,20 @@ def train_hybrid_compensator(
 
 def estimate_firmware_bias_sequence(
     firmware_model: FirmwareStateModel,
+    q: np.ndarray,
     qd: np.ndarray,
-    residual_after_static: np.ndarray,
+    qdd: np.ndarray,
     timestamps: np.ndarray | None,
 ) -> np.ndarray:
-    tracker = FirmwareBiasTracker(firmware_model)
+    tracker = KinematicFirmwareBiasTracker(firmware_model)
+    q_arr = np.asarray(q, dtype=np.float64)
     qd_arr = np.asarray(qd, dtype=np.float64)
-    residual_arr = np.asarray(residual_after_static, dtype=np.float64)
+    qdd_arr = np.asarray(qdd, dtype=np.float64)
     if timestamps is None:
         ts = np.arange(qd_arr.shape[0], dtype=np.float64) * 0.01
     else:
         ts = np.asarray(timestamps, dtype=np.float64)
-    out = np.zeros_like(residual_arr)
+    out = np.zeros_like(qd_arr)
     for idx in range(qd_arr.shape[0]):
-        out[idx] = tracker.update(qd_arr[idx], residual_arr[idx], timestamp=float(ts[idx])).bias
+        out[idx] = tracker.update(q_arr[idx], qd_arr[idx], qdd_arr[idx], timestamp=float(ts[idx])).bias
     return out

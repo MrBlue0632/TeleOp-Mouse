@@ -9,11 +9,37 @@ from dynamics.main import parse_args, run_cli_args
 
 class DynamicsApiTests(unittest.TestCase):
     def test_parse_args_accepts_explicit_argv(self):
-        args = parse_args(["--mode", "traj", "--robot", "xarm6", "--hz", "50"])
+        args = parse_args(
+            [
+                "--mode",
+                "traj",
+                "--robot",
+                "xarm6",
+                "--hz",
+                "50",
+                "--traj-kind",
+                "workspace",
+                "--traj",
+                "drag.parquet",
+                "--traj",
+                "workspace.parquet",
+                "--workspace-points",
+                "8",
+                "--workspace-speed-deg-s",
+                "25",
+                "--workspace-seed",
+                "11",
+            ]
+        )
 
         self.assertEqual(args.mode, "traj")
         self.assertEqual(args.robot, "xarm6")
         self.assertEqual(args.hz, 50.0)
+        self.assertEqual(args.traj_kind, "workspace")
+        self.assertEqual(args.traj, ["drag.parquet", "workspace.parquet"])
+        self.assertEqual(args.workspace_points, 8)
+        self.assertEqual(args.workspace_speed_deg_s, 25.0)
+        self.assertEqual(args.workspace_seed, 11)
 
     def test_run_cli_args_loads_config_and_dispatches_mode(self):
         args = argparse.Namespace(
@@ -30,7 +56,12 @@ class DynamicsApiTests(unittest.TestCase):
             output_dir="out",
             duration_s=None,
             teach_sensitivity=None,
-            traj="traj.parquet",
+            traj=["traj.parquet", "workspace.parquet"],
+            traj_kind="all",
+            workspace_points=20,
+            workspace_margin_ratio=0.05,
+            workspace_speed_deg_s=30.0,
+            workspace_seed=7,
             data=None,
             static_data=None,
             stop_data=None,
@@ -55,7 +86,12 @@ class DynamicsApiTests(unittest.TestCase):
             output_dir="out",
             duration_s=None,
             teach_sensitivity=None,
-            traj_path="traj.parquet",
+            traj_path=["traj.parquet", "workspace.parquet"],
+            traj_kind="all",
+            workspace_points=20,
+            workspace_margin_ratio=0.05,
+            workspace_speed_deg_s=30.0,
+            workspace_seed=7,
             data_path=None,
             static_data_path=None,
             stop_data_path=None,

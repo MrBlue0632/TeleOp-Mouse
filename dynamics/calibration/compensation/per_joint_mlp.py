@@ -10,6 +10,9 @@ import torch
 from torch import nn
 
 
+DEFAULT_HISTORY_STEPS = 3
+
+
 class JointMLP(nn.Module):
     def __init__(self, input_dim: int, hidden_dim: int = 64):
         super().__init__()
@@ -34,6 +37,42 @@ def _as_matrix(values: np.ndarray, joint_count: int, name: str) -> np.ndarray:
     return arr
 
 
+def build_motion_history_features(
+    q: np.ndarray,
+    qd: np.ndarray,
+    qdd: np.ndarray,
+    *,
+    history_steps: int = DEFAULT_HISTORY_STEPS,
+) -> np.ndarray:
+    """Flatten previous q/qd/qdd samples for each row.
+
+    The window is causal: lag 1 is the immediately previous sample, lag 2 is
+    the sample before that, and missing startup history is zero-padded.
+    """
+    q_arr = np.asarray(q, dtype=np.float64)
+    if q_arr.ndim != 2:
+        raise ValueError(f"q must have shape (N, J), got {q_arr.shape}")
+    joint_count = int(q_arr.shape[1])
+    qd_arr = _as_matrix(qd, joint_count, "qd")
+    qdd_arr = _as_matrix(qdd, joint_count, "qdd")
+    steps = int(history_steps)
+    if steps < 0:
+        raise ValueError("history_steps must be >= 0")
+    if steps == 0:
+        return np.zeros((q_arr.shape[0], 0), dtype=np.float32)
+
+    out = np.zeros((q_arr.shape[0], steps * joint_count * 3), dtype=np.float64)
+    width = joint_count * 3
+    for row in range(q_arr.shape[0]):
+        for lag in range(1, steps + 1):
+            src = row - lag
+            if src < 0:
+                continue
+            start = (lag - 1) * width
+            out[row, start : start + width] = np.concatenate([q_arr[src], qd_arr[src], qdd_arr[src]])
+    return out.astype(np.float32)
+
+
 def motion_features(
     q: np.ndarray,
     qd: np.ndarray,
@@ -42,6 +81,9 @@ def motion_features(
     motion_lambda: np.ndarray,
     time_since_stop: np.ndarray,
     joint_index: int,
+    history_features: np.ndarray | None = None,
+    *,
+    history_steps: int = DEFAULT_HISTORY_STEPS,
 ) -> np.ndarray:
     """Build motion residual features for one joint.
 
@@ -61,6 +103,18 @@ def motion_features(
         lam = np.full(q_arr.shape[0], float(lam), dtype=np.float64)
     if lam.shape != (q_arr.shape[0],):
         raise ValueError(f"motion_lambda must have shape ({q_arr.shape[0]},), got {lam.shape}")
+    steps = int(history_steps)
+    if steps < 0:
+        raise ValueError("history_steps must be >= 0")
+    expected_history_dim = steps * joint_count * 3
+    if history_features is None:
+        hist = np.zeros((q_arr.shape[0], expected_history_dim), dtype=np.float64)
+    else:
+        hist = np.asarray(history_features, dtype=np.float64)
+        if hist.ndim == 1:
+            hist = hist[None, :]
+        if hist.shape != (q_arr.shape[0], expected_history_dim):
+            raise ValueError(f"history_features must have shape ({q_arr.shape[0]}, {expected_history_dim}), got {hist.shape}")
 
     j = int(joint_index)
     parts = [
@@ -74,6 +128,7 @@ def motion_features(
         lam[:, None],
         tss_arr[:, [j]],
         np.sign(qd_arr[:, [j]]),
+        hist,
     ]
     return np.concatenate(parts, axis=1).astype(np.float32)
 
@@ -87,12 +142,31 @@ class PerJointMotionModel:
     y_std: np.ndarray
     joint_count: int
     hidden_dim: int = 64
+    history_steps: int = DEFAULT_HISTORY_STEPS
 
     @classmethod
-    def zeros(cls, joint_count: int, *, input_dim: int | None = None, hidden_dim: int = 64) -> "PerJointMotionModel":
+    def zeros(
+        cls,
+        joint_count: int,
+        *,
+        input_dim: int | None = None,
+        hidden_dim: int = 64,
+        history_steps: int = DEFAULT_HISTORY_STEPS,
+    ) -> "PerJointMotionModel":
         if input_dim is None:
             sample = np.zeros((1, joint_count), dtype=np.float64)
-            input_dim = int(motion_features(sample, sample, sample, sample, np.zeros(1), sample, 0).shape[1])
+            input_dim = int(
+                motion_features(
+                    sample,
+                    sample,
+                    sample,
+                    sample,
+                    np.zeros(1),
+                    sample,
+                    0,
+                    history_steps=history_steps,
+                ).shape[1]
+            )
         models = [JointMLP(input_dim, hidden_dim=hidden_dim) for _ in range(joint_count)]
         return cls(
             models=models,
@@ -102,6 +176,7 @@ class PerJointMotionModel:
             y_std=np.ones(joint_count, dtype=np.float32),
             joint_count=int(joint_count),
             hidden_dim=int(hidden_dim),
+            history_steps=int(history_steps),
         )
 
     def predict(
@@ -112,6 +187,7 @@ class PerJointMotionModel:
         tau_model: np.ndarray,
         motion_lambda: np.ndarray | float,
         time_since_stop: np.ndarray,
+        history_features: np.ndarray | None = None,
     ) -> np.ndarray:
         q_arr = np.asarray(q, dtype=np.float64)
         single = q_arr.ndim == 1
@@ -124,10 +200,26 @@ class PerJointMotionModel:
         lam = np.asarray(motion_lambda, dtype=np.float64)
         if lam.ndim == 0:
             lam = np.full(q_arr.shape[0], float(lam), dtype=np.float64)
+        if history_features is None:
+            hist = None
+        else:
+            hist = np.asarray(history_features, dtype=np.float64)
+            if hist.ndim == 1:
+                hist = hist[None, :]
 
         out = np.zeros((q_arr.shape[0], self.joint_count), dtype=np.float64)
         for joint, model in enumerate(self.models):
-            x = motion_features(q_arr, qd_arr, qdd_arr, tau_arr, lam, tss_arr, joint)
+            x = motion_features(
+                q_arr,
+                qd_arr,
+                qdd_arr,
+                tau_arr,
+                lam,
+                tss_arr,
+                joint,
+                hist,
+                history_steps=self.history_steps,
+            )
             x_norm = (x - self.x_mean[joint]) / self.x_std[joint]
             model.eval()
             with torch.no_grad():
@@ -145,6 +237,7 @@ class PerJointMotionModel:
             "joint_count": self.joint_count,
             "hidden_dim": self.hidden_dim,
             "input_dim": int(self.x_mean[0].shape[0]) if self.x_mean else 0,
+            "history_steps": self.history_steps,
         }
 
     @classmethod
@@ -152,6 +245,7 @@ class PerJointMotionModel:
         joint_count = int(data["joint_count"])
         hidden_dim = int(data.get("hidden_dim", 64))
         input_dim = int(data["input_dim"])
+        history_steps = int(data.get("history_steps", 0))
         models = [JointMLP(input_dim, hidden_dim=hidden_dim) for _ in range(joint_count)]
         for model, state_dict in zip(models, data["state_dicts"]):
             model.load_state_dict(state_dict)
@@ -163,6 +257,7 @@ class PerJointMotionModel:
             y_std=np.asarray(data["y_std"], dtype=np.float32),
             joint_count=joint_count,
             hidden_dim=hidden_dim,
+            history_steps=history_steps,
         )
 
 
@@ -179,6 +274,7 @@ def train_per_joint_motion_model(
     lr: float = 1e-3,
     hidden_dim: int = 64,
     seed: int = 7,
+    history_steps: int = DEFAULT_HISTORY_STEPS,
 ) -> tuple[PerJointMotionModel, list[list[float]]]:
     q_arr = np.asarray(q, dtype=np.float64)
     if q_arr.ndim != 2:
@@ -186,6 +282,7 @@ def train_per_joint_motion_model(
     joint_count = int(q_arr.shape[1])
     target_arr = _as_matrix(target, joint_count, "target")
     torch.manual_seed(seed)
+    history_features = build_motion_history_features(q_arr, qd, qdd, history_steps=history_steps)
 
     models: list[JointMLP] = []
     x_means: list[np.ndarray] = []
@@ -195,7 +292,17 @@ def train_per_joint_motion_model(
     losses_by_joint: list[list[float]] = []
 
     for joint in range(joint_count):
-        x = motion_features(q, qd, qdd, tau_model, motion_lambda, time_since_stop, joint)
+        x = motion_features(
+            q,
+            qd,
+            qdd,
+            tau_model,
+            motion_lambda,
+            time_since_stop,
+            joint,
+            history_features,
+            history_steps=history_steps,
+        )
         y = target_arr[:, joint].astype(np.float32)
         x_mean = x.mean(axis=0).astype(np.float32)
         x_std = (x.std(axis=0) + 1e-6).astype(np.float32)
@@ -231,6 +338,7 @@ def train_per_joint_motion_model(
             y_std=y_std,
             joint_count=joint_count,
             hidden_dim=int(hidden_dim),
+            history_steps=int(history_steps),
         ),
         losses_by_joint,
     )

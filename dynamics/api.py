@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from typing import Any, Sequence
 
 from .config import load_config
-from .main import DEFAULT_COMPENSATION_PATH, DEFAULT_TORQUE_DIR, DEFAULT_TRAJ_DIR, MODES
+from .main import DEFAULT_COMPENSATION_PATH, DEFAULT_TORQUE_DIR, DEFAULT_TRAJ_DIR, MODES, TRAJ_KINDS
 from .resolver import ResolvedRobot, resolve_robot
 
 
@@ -43,7 +43,12 @@ def run_mode(
     output_dir: str | Path | None = None,
     duration_s: float | None = None,
     teach_sensitivity: int | None = None,
-    traj_path: str | Path | None = None,
+    traj_path: str | Path | Sequence[str | Path] | None = None,
+    traj_kind: str = "all",
+    workspace_points: int = 20,
+    workspace_margin_ratio: float = 0.05,
+    workspace_speed_deg_s: float = 30.0,
+    workspace_seed: int = 7,
     data_path: str | Path | None = None,
     static_data_path: str | Path | None = None,
     stop_data_path: str | Path | None = None,
@@ -54,7 +59,7 @@ def run_mode(
     lr: float = 1e-3,
     hidden_dim: int = 64,
     hz: float | None = None,
-) -> Path | None:
+) -> Path | list[Path] | None:
     """Run one dynamics workflow mode through the local orchestration module."""
     from .main import run_mode as run_workflow_mode
 
@@ -65,6 +70,11 @@ def run_mode(
         duration_s=duration_s,
         teach_sensitivity=teach_sensitivity,
         traj_path=traj_path,
+        traj_kind=traj_kind,
+        workspace_points=workspace_points,
+        workspace_margin_ratio=workspace_margin_ratio,
+        workspace_speed_deg_s=workspace_speed_deg_s,
+        workspace_seed=workspace_seed,
         data_path=data_path,
         static_data_path=static_data_path,
         stop_data_path=stop_data_path,
@@ -78,7 +88,7 @@ def run_mode(
     )
 
 
-def run_cli_args(args: Any) -> Path | None:
+def run_cli_args(args: Any) -> Path | list[Path] | None:
     """Run a dynamics workflow from parsed CLI arguments."""
     from .main import run_cli_args as run_workflow_cli_args
 
@@ -90,6 +100,7 @@ __all__ = [
     "DEFAULT_TORQUE_DIR",
     "DEFAULT_TRAJ_DIR",
     "MODES",
+    "TRAJ_KINDS",
     "build_theoretical_model",
     "load_dynamics_config",
     "resolve_robot_from_config",
