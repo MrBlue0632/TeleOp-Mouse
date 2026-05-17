@@ -22,6 +22,7 @@ import cv2
 import numpy as np
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
 from robot_control.torque_estimation import FirmwareBiasTorqueEstimator
+from teleop_web import DashboardState, build_app_snapshot, start_dashboard_server
 from xarm.core.config.x_config import XCONF
 from xarm.wrapper import XArmAPI
 
@@ -291,7 +292,7 @@ class TkVideoWindow:
 
 
 class TeleopApp:
-    def __init__(self, robot_ip, rate_hz, control_hz, data_dir, camera_id, camera_dev, base_camera_id, base_camera_dev, target_camera_id, target_camera_dev, display_camera, strict_camera_dev, show_video, fps_mouse, sdk_timeout_s, video_hz, repo_id, task, vcodec, encoder_threads, encoder_queue_maxsize, torque_comp_model=None):
+    def __init__(self, robot_ip, rate_hz, control_hz, data_dir, camera_id, camera_dev, base_camera_id, base_camera_dev, target_camera_id, target_camera_dev, display_camera, strict_camera_dev, show_video, fps_mouse, sdk_timeout_s, video_hz, repo_id, task, vcodec, encoder_threads, encoder_queue_maxsize, torque_comp_model=None, web_dashboard=False, web_host="127.0.0.1", web_port=8765, web_fps=10.0):
         self.robot_ip = robot_ip
         self.rate_hz = rate_hz
         self.control_hz = float(control_hz)
@@ -314,6 +315,13 @@ class TeleopApp:
         self.encoder_threads = encoder_threads
         self.encoder_queue_maxsize = encoder_queue_maxsize
         self.torque_comp_model = torque_comp_model
+        self.web_dashboard = bool(web_dashboard)
+        self.web_host = web_host
+        self.web_port = int(web_port)
+        self.web_fps = float(web_fps)
+        self.dashboard_state = None
+        self.dashboard_server = None
+        self.last_diag = {}
         self.camera_probe_timeout_s = 1.8
 
         # 2x faster than previous defaults, while still conservative
@@ -349,6 +357,15 @@ class TeleopApp:
         self.ee_force = np.zeros(6, dtype=np.float64)  # [Fx,Fy,Fz,Tx,Ty,Tz]
         self.ee_force_ema = 0.1  # EMA filter coefficient
         self.torque_estimator = FirmwareBiasTorqueEstimator(compensation_path=self.torque_comp_model)
+        if getattr(self.torque_estimator, "hybrid", None) is not None:
+            self.dashboard_torque_mode = "compensation_model"
+            self.dashboard_torque_note = "loaded compensation checkpoint"
+        elif getattr(self.torque_estimator, "hybrid_error", None):
+            self.dashboard_torque_mode = "firmware_bias_fallback"
+            self.dashboard_torque_note = f"compensation load failed: {self.torque_estimator.hybrid_error}"
+        else:
+            self.dashboard_torque_mode = "firmware_bias_fallback"
+            self.dashboard_torque_note = "no compensation checkpoint; using model plus firmware-bias fallback"
         self.last_torque_estimate = {
             "lambda": 0.0,
             "tau_model": np.zeros(6, dtype=np.float64),
@@ -455,6 +472,7 @@ class TeleopApp:
         self.last_robot_err = None
 
         self._init_lerobot_dataset()
+        self._init_web_dashboard()
 
     def _build_lerobot_features(self):
         return {
@@ -599,6 +617,39 @@ class TeleopApp:
             )
         print(f"[INFO] LeRobot dataset ready: {self.lerobot_dataset.num_episodes} episodes, "
               f"{self.lerobot_dataset.meta.total_frames} frames")
+
+    def _init_web_dashboard(self):
+        if not self.web_dashboard:
+            return
+        self.dashboard_state = DashboardState(
+            reset_callback=self.request_home_from_web,
+            saving_provider=lambda: self.saving_evt.is_set(),
+            web_fps=self.web_fps,
+        )
+        self.publish_web_telemetry()
+        self.dashboard_server = start_dashboard_server(
+            self.dashboard_state,
+            host=self.web_host,
+            port=self.web_port,
+            repo_root=REPO_ROOT,
+        )
+
+    def request_home_from_web(self):
+        if not self.running:
+            raise RuntimeError("teleop is not running")
+        with self.lock:
+            self.home_requested = True
+
+    def publish_web_telemetry(self):
+        if self.dashboard_state is None:
+            return
+        try:
+            self.dashboard_state.publish_snapshot(build_app_snapshot(self))
+        except Exception as exc:
+            now = time.monotonic()
+            if not hasattr(self, "_last_web_publish_warn_ts") or now - self._last_web_publish_warn_ts > 2.0:
+                self._last_web_publish_warn_ts = now
+                print(f"\n[WARN] web telemetry publish failed: {exc}")
 
     def ensure_robot_ready(self, timeout_s=6.0):
         deadline = time.monotonic() + timeout_s
@@ -836,6 +887,10 @@ class TeleopApp:
         wrist_frame = self._get_camera_frame_rgb(self.camera)
         base_frame = self._get_camera_frame_rgb(self.base_camera)
         target_frame = self._get_camera_frame_rgb(self.target_camera)
+        if self.dashboard_state is not None:
+            self.dashboard_state.publish_frame("wrist", wrist_frame, rgb=True)
+            self.dashboard_state.publish_frame("base", base_frame, rgb=True)
+            self.dashboard_state.publish_frame("target", target_frame, rgb=True)
 
         pose = [float(x) for x in state.get("pose_xyzrpy_deg", [0.0] * 6)]
         filtered = state.get("torques_filtered", [0.0] * 7)
@@ -1384,6 +1439,20 @@ class TeleopApp:
         if ew and ew[0] == 0 and len(ew) > 1 and isinstance(ew[1], (list, tuple)) and len(ew[1]) > 0:
             self.last_robot_err = int(ew[1][0])
 
+        self.last_diag = {
+            "ctrl_hz": ctrl_hz,
+            "main_hz": main_hz,
+            "video_hz": video_hz,
+            "send_count": send_cnt,
+            "send_fail": send_fail,
+            "send_fail_rate": fail_rate,
+            "send_ms_avg": send_avg,
+            "send_ms_max": send_max,
+            "camera_fps": cam_fps,
+            "camera_age_ms": cam_age_ms,
+        }
+        self.publish_web_telemetry()
+
         print(
             f"\n[DIAG] ctrl={ctrl_hz:5.1f}Hz main={main_hz:5.1f}Hz video={video_hz:5.1f}Hz "
             f"send={send_cnt:4d}/s fail={send_fail:3d}({fail_rate:4.1f}%) "
@@ -1466,6 +1535,7 @@ class TeleopApp:
             st["action_velocity_cmd"] = list(self.last_velocity_cmd)
             st["action_gripper"] = float(self.gripper_pos)
             self.capture_episode_observation(st)
+            self.publish_web_telemetry()
             self.print_currents(st)
             self.maybe_print_diag()
 
@@ -1507,6 +1577,8 @@ class TeleopApp:
             self.base_camera.close()
         if self.target_camera is not None:
             self.target_camera.close()
+        if self.dashboard_server is not None:
+            self.dashboard_server.stop()
         if self.torque_estimator is not None:
             self.torque_estimator.close()
         self.arm.disconnect()
@@ -1553,6 +1625,10 @@ def main():
     parser.add_argument("--encoder-threads", type=int, default=2, help="Threads per video encoder")
     parser.add_argument("--encoder-queue-maxsize", type=int, default=30, help="Max buffered frames per camera")
     parser.add_argument("--torque-comp-model", default=os.getenv("TELEOP_TORQUE_COMP_MODEL"), help="Optional hybrid torque compensation checkpoint")
+    parser.add_argument("--web-dashboard", action="store_true", help="Enable the TeleOp web dashboard")
+    parser.add_argument("--web-host", default="127.0.0.1", help="Dashboard bind host")
+    parser.add_argument("--web-port", type=int, default=8765, help="Dashboard bind port")
+    parser.add_argument("--web-fps", type=float, default=10.0, help="Max MJPEG publish FPS per camera")
     parser.add_argument("--self-check", action="store_true")
     args = parser.parse_args()
 
@@ -1588,6 +1664,10 @@ def main():
         args.encoder_threads,
         args.encoder_queue_maxsize,
         args.torque_comp_model,
+        args.web_dashboard,
+        args.web_host,
+        args.web_port,
+        args.web_fps,
     )
 
     def _handle(_sig, _frm):

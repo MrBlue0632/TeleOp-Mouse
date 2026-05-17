@@ -1,0 +1,193 @@
+:root {
+  --bg: #050403;
+  --panel: #11100d;
+  --panel-2: #17140f;
+  --line: rgba(215, 167, 53, 0.28);
+  --line-strong: rgba(215, 167, 53, 0.62);
+  --text: #f5ead8;
+  --muted: #b8a783;
+  --gold: #d7a735;
+  --orange: #f08a24;
+  --red: #ff5738;
+  --green: #79d88f;
+  --black: #050403;
+}
+
+* { box-sizing: border-box; }
+html { background: var(--bg); color: var(--text); }
+body {
+  margin: 0;
+  min-height: 100vh;
+  font-family: ui-sans-serif, "Avenir Next", "PingFang SC", "Microsoft YaHei", sans-serif;
+  letter-spacing: 0;
+  background: var(--bg);
+}
+button {
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  background: var(--panel-2);
+  color: var(--text);
+  min-height: 34px;
+  padding: 0 12px;
+  font-weight: 700;
+  cursor: pointer;
+}
+button:hover { border-color: var(--gold); background: #201a11; }
+button.primary { background: var(--gold); color: #0b0703; border-color: var(--gold); }
+button.danger { border-color: rgba(255, 87, 56, 0.75); background: #21100d; }
+button:disabled { opacity: 0.45; cursor: not-allowed; }
+
+.topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+  padding: 22px 28px 16px;
+  border-bottom: 1px solid var(--line);
+}
+h1, h2, h3, p { margin: 0; }
+h1 { font-size: 28px; font-weight: 800; }
+h2 { font-size: 18px; font-weight: 800; }
+h3 { font-size: 13px; color: var(--gold); margin-bottom: 10px; text-transform: uppercase; }
+.eyebrow { color: var(--gold); font-size: 11px; font-weight: 800; text-transform: uppercase; margin-bottom: 4px; }
+.status-strip, .button-row, .camera-tabs { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.status-pill, .metric-chip {
+  display: inline-flex;
+  align-items: center;
+  min-height: 32px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 0 10px;
+  color: var(--green);
+  background: rgba(121, 216, 143, 0.08);
+  font-size: 12px;
+  font-weight: 800;
+}
+.status-pill.warn { color: var(--orange); background: rgba(240, 138, 36, 0.1); }
+.metric-chip { color: var(--text); background: rgba(255, 255, 255, 0.04); }
+
+.dashboard-shell {
+  display: grid;
+  grid-template-columns: minmax(520px, 1.55fr) minmax(260px, 0.58fr) minmax(300px, 0.72fr);
+  grid-template-areas:
+    "vision vision robot"
+    "vision vision dataset"
+    "torque config hotkeys";
+  align-items: start;
+  gap: 14px;
+  padding: 14px;
+}
+.panel {
+  min-width: 0;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel);
+  box-shadow: 0 1px 0 rgba(215, 167, 53, 0.09);
+  padding: 14px;
+}
+.panel-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 12px; }
+.panel-head.compact { margin-bottom: 8px; }
+.vision-panel { grid-area: vision; }
+.robot-panel { grid-area: robot; }
+.dataset-panel { grid-area: dataset; }
+.torque-panel { grid-area: torque; }
+.config-panel { grid-area: config; }
+.hotkeys-panel { grid-area: hotkeys; }
+
+.tab.active { background: var(--gold); color: #120a03; }
+.primary-vision {
+  min-height: min(72vh, 780px);
+  display: flex;
+  flex-direction: column;
+}
+.primary-vision .panel-head { flex: 0 0 auto; }
+.camera-frame {
+  position: relative;
+  aspect-ratio: 4 / 3;
+  border-radius: 8px;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  background: #050505;
+}
+.primary-vision .camera-frame {
+  flex: 1 1 auto;
+  min-height: clamp(420px, 58vh, 720px);
+  aspect-ratio: 16 / 9;
+}
+.camera-frame img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.camera-overlay {
+  position: absolute;
+  left: 12px;
+  bottom: 12px;
+  background: rgba(0, 0, 0, 0.58);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 7px 10px;
+  color: var(--muted);
+  font-size: 12px;
+}
+.data-row { margin-top: 10px; color: var(--muted); font-size: 12px; }
+.robot-canvas-wrap { border: 1px solid var(--line); border-radius: 8px; background: #060504; height: 420px; }
+.compact-robot .robot-canvas-wrap { height: 220px; }
+#robotCanvas { width: 100%; height: 100%; display: block; }
+.urdf-line { display: flex; justify-content: space-between; gap: 10px; color: var(--muted); font-size: 12px; margin-top: 9px; }
+.compact-robot .urdf-line { flex-direction: column; }
+
+.kv-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px 10px; margin: 0; }
+.kv-grid dt { color: var(--muted); font-size: 11px; }
+.kv-grid dd { margin: 0; font-size: 13px; font-weight: 800; overflow-wrap: anywhere; }
+.mini-section { margin-top: 16px; }
+.joint-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 7px; }
+.joint-cell {
+  border: 1px solid rgba(255,255,255,0.07);
+  border-radius: 8px;
+  padding: 8px;
+  background: rgba(255,255,255,0.035);
+}
+.joint-cell span { display: block; color: var(--muted); font-size: 10px; }
+.joint-cell strong { display: block; margin-top: 3px; font-size: 14px; }
+
+.torque-bars { display: grid; gap: 9px; }
+.torque-row { display: grid; grid-template-columns: 34px 76px 1fr 76px; gap: 10px; align-items: center; }
+.torque-row .api { color: var(--muted); font-variant-numeric: tabular-nums; }
+.track { height: 16px; border-radius: 8px; background: #332517; overflow: hidden; border: 1px solid rgba(255,255,255,0.08); }
+.fill { height: 100%; width: 0; background: var(--gold); transition: width 140ms linear; }
+.ext { text-align: right; font-weight: 800; font-variant-numeric: tabular-nums; }
+.note { margin-top: 10px; color: var(--muted); font-size: 12px; line-height: 1.45; }
+#configText {
+  width: 100%;
+  min-height: 260px;
+  resize: vertical;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 12px;
+  background: #090704;
+  color: #f9e7c4;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.5;
+}
+.hotkey-grid { display: grid; grid-template-columns: minmax(88px, 0.7fr) 1fr; gap: 8px 12px; font-size: 12px; }
+.hotkey-grid span:nth-child(odd) { color: var(--gold); font-weight: 800; }
+.hotkey-grid span:nth-child(even) { color: var(--muted); }
+
+@media (max-width: 1180px) {
+  .dashboard-shell {
+    grid-template-columns: 1fr 1fr;
+    grid-template-areas:
+      "vision vision"
+      "robot dataset"
+      "torque config"
+      "hotkeys hotkeys";
+  }
+  .primary-vision { min-height: auto; }
+  .primary-vision .camera-frame { min-height: 420px; }
+}
+@media (max-width: 760px) {
+  .topbar { align-items: flex-start; flex-direction: column; padding: 18px; }
+  .dashboard-shell { grid-template-columns: 1fr; grid-template-areas: "vision" "robot" "dataset" "torque" "config" "hotkeys"; padding: 10px; }
+  .primary-vision .camera-frame { min-height: 250px; aspect-ratio: 16 / 10; }
+  .robot-canvas-wrap { height: 260px; }
+  .compact-robot .robot-canvas-wrap { height: 220px; }
+  .torque-row { grid-template-columns: 30px 64px 1fr 60px; gap: 7px; }
+}

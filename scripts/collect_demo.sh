@@ -21,6 +21,10 @@ REPO_ID="${REPO_ID:-teleop/xarm_demo}"
 TASK="${TASK:-keyboard_mouse_teleop}"
 RATE_HZ="${RATE_HZ:-30}"
 VCODEC="${VCODEC:-libsvtav1}"
+WEB_DASHBOARD="${WEB_DASHBOARD:-0}"
+WEB_HOST="${WEB_HOST:-127.0.0.1}"
+WEB_PORT="${WEB_PORT:-8765}"
+WEB_FPS="${WEB_FPS:-10}"
 
 # ---------- 相机配置 ----------
 WRIST_CAM_ID="${WRIST_CAM_ID:-10}"
@@ -85,9 +89,18 @@ while [[ $# -gt 0 ]]; do
         --base-cam-dev)    BASE_CAM_DEV="$2"; shift 2 ;;
         --target-cam-dev)  TARGET_CAM_DEV="$2"; shift 2 ;;
         --display-camera)  DISPLAY_CAMERA="$2"; shift 2 ;;
+        --web-dashboard)   WEB_DASHBOARD="1"; shift ;;
+        --web-host)        WEB_HOST="$2"; shift 2 ;;
+        --web-port)        WEB_PORT="$2"; shift 2 ;;
+        --web-fps)         WEB_FPS="$2"; shift 2 ;;
         *)                 EXTRA_ARGS+=("$1"); shift ;;
     esac
 done
+
+WEB_ARGS=(--web-host "${WEB_HOST}" --web-port "${WEB_PORT}" --web-fps "${WEB_FPS}")
+if [[ "${WEB_DASHBOARD}" == "1" || "${WEB_DASHBOARD}" == "true" || "${WEB_DASHBOARD}" == "TRUE" ]]; then
+    WEB_ARGS=(--web-dashboard "${WEB_ARGS[@]}")
+fi
 
 # ---------- 端口转发检测 ----------
 ROBOT_PORT=502
@@ -126,6 +139,7 @@ echo "  Repo ID       : ${REPO_ID}"
 echo "  Task          : ${TASK}"
 echo "  FPS           : ${RATE_HZ}"
 echo "  Codec         : ${VCODEC}"
+echo "  Web Dashboard : ${WEB_DASHBOARD} (${WEB_HOST}:${WEB_PORT}, ${WEB_FPS} fps)"
 echo "  Torque Data   : raw/model/external/bias + EE wrench"
 echo "  ---"
 echo "  Wrist Camera  : ${WRIST_CAM_DEV}"
@@ -165,4 +179,5 @@ exec python3 "${SCRIPT_PATH}" \
     --repo-id "${REPO_ID}" \
     --task "${TASK}" \
     --vcodec "${VCODEC}" \
+    "${WEB_ARGS[@]}" \
     "${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"}"

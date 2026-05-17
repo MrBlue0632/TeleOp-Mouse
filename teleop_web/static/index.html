@@ -1,0 +1,131 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>TeleOp Web Dashboard</title>
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+  <header class="topbar">
+    <div>
+      <p class="eyebrow">TeleOp Mouse Collection</p>
+      <h1>xArm6 数据采集仪表盘</h1>
+    </div>
+    <div class="status-strip">
+      <span id="connStatus" class="status-pill warn">CONNECTING</span>
+      <span id="robotState" class="metric-chip">state --</span>
+      <span id="episodeChip" class="metric-chip">episode --</span>
+      <button id="resetBtn" class="danger" type="button">Reset Home</button>
+    </div>
+  </header>
+
+  <main class="dashboard-shell">
+    <section class="panel vision-panel primary-vision">
+      <div class="panel-head">
+        <div>
+          <p class="eyebrow">Vision</p>
+          <h2>相机画面</h2>
+        </div>
+        <div class="camera-tabs" role="tablist" aria-label="camera streams">
+          <button class="tab active" data-camera="wrist" type="button">Wrist</button>
+          <button class="tab" data-camera="base" type="button">Base</button>
+          <button class="tab" data-camera="target" type="button">Target</button>
+        </div>
+      </div>
+      <div class="camera-frame">
+        <img id="cameraFeed" src="/stream/wrist.mjpg" alt="camera stream">
+        <div id="cameraOverlay" class="camera-overlay">等待相机帧</div>
+      </div>
+      <div id="cameraStats" class="data-row"></div>
+    </section>
+
+    <section class="panel robot-panel compact-robot">
+      <div class="panel-head">
+        <div>
+          <p class="eyebrow">URDF / Mesh Pose</p>
+          <h2>机械臂仿真</h2>
+        </div>
+        <span id="coordFrame" class="status-pill">BASE</span>
+      </div>
+      <div class="robot-canvas-wrap">
+        <canvas id="robotCanvas" width="720" height="520"></canvas>
+      </div>
+      <div class="urdf-line">
+        <span id="urdfStatus">URDF loading...</span>
+        <span id="poseSummary">pose --</span>
+      </div>
+    </section>
+
+    <aside class="panel dataset-panel">
+      <div class="panel-head compact">
+        <div>
+          <p class="eyebrow">LeRobot</p>
+          <h2>采集状态</h2>
+        </div>
+      </div>
+      <dl class="kv-grid" id="datasetGrid"></dl>
+      <div class="mini-section">
+        <h3>State</h3>
+        <div id="stateGrid" class="joint-grid"></div>
+      </div>
+      <div class="mini-section">
+        <h3>Action</h3>
+        <div id="actionGrid" class="joint-grid"></div>
+      </div>
+    </aside>
+
+    <section class="panel torque-panel">
+      <div class="panel-head">
+        <div>
+          <p class="eyebrow">Torque</p>
+          <h2>API 力矩与估计外力矩</h2>
+        </div>
+        <span id="torqueMode" class="status-pill warn">fallback</span>
+      </div>
+      <div id="torqueBars" class="torque-bars"></div>
+      <p id="torqueNote" class="note"></p>
+    </section>
+
+    <section class="panel config-panel">
+      <div class="panel-head">
+        <div>
+          <p class="eyebrow">Config</p>
+          <h2>配置编辑</h2>
+        </div>
+        <div class="button-row">
+          <button data-config="global" type="button">Global</button>
+          <button data-config="robot" type="button">Robot</button>
+          <button id="validateConfig" type="button">Validate</button>
+          <button id="saveConfig" class="primary" type="button">Save</button>
+        </div>
+      </div>
+      <textarea id="configText" spellcheck="false" aria-label="config yaml"></textarea>
+      <p id="configStatus" class="note">连接、URDF、payload 修改将在下次启动生效。</p>
+    </section>
+
+    <section class="panel hotkeys-panel">
+      <div class="panel-head compact">
+        <div>
+          <p class="eyebrow">Controls</p>
+          <h2>快捷键</h2>
+        </div>
+      </div>
+      <div class="hotkey-grid">
+        <span>W/S</span><span>前进 / 后退</span>
+        <span>A/D</span><span>左 / 右</span>
+        <span>Space/Shift</span><span>下 / 上</span>
+        <span>Q/E</span><span>Z 轴旋转</span>
+        <span>Mouse</span><span>X/Y 轴旋转</span>
+        <span>Left Click</span><span>夹爪切换</span>
+        <span>Tab</span><span>BASE / TOOL</span>
+        <span>1/2/3</span><span>速度倍率</span>
+        <span>R</span><span>回到 Home</span>
+        <span>Enter</span><span>保存 episode</span>
+      </div>
+    </section>
+  </main>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
