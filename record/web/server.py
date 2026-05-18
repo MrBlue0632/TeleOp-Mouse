@@ -1,4 +1,9 @@
-"""Standard-library HTTP server for the TeleOp dashboard."""
+"""Standard-library HTTP server for the record dashboard.
+
+Inputs: a ``DashboardState`` plus repository root and HTTP bind settings.
+Returns: a background HTTP server exposing static UI, SSE telemetry, MJPEG, config,
+reset, and robot-model endpoints.
+"""
 
 from __future__ import annotations
 
@@ -21,7 +26,7 @@ from .model import inspect_robot_model
 from .telemetry import DashboardState, json_dumps, torque_bar
 
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
+REPO_ROOT = Path(__file__).resolve().parents[2]
 STATIC_ROOT = Path(__file__).resolve().parent / "static"
 CONFIG_FILES = {
     "global": Path("dynamics/config.yaml"),

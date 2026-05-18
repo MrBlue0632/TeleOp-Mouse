@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-SCRIPT_PATH="${ROOT_DIR}/scripts/teleop_keyboard_mouse.py"
+SCRIPT_PATH="${ROOT_DIR}/record/legacy/teleop_keyboard_mouse.py"
 DATA_DIR="${ROOT_DIR}/data"
 
 has_local_forward() {
@@ -51,7 +51,7 @@ PY
 
 show_help() {
   cat <<'EOF'
-Usage: ./scripts/run_local_teleop.sh [teleop args...]
+Usage: ./record/run_local_teleop.sh [teleop args...]
 
 Local-only launcher. No SSH tunnel logic is included.
 
@@ -64,9 +64,9 @@ Common overrides:
   --no-fps-mouse
 
 Examples:
-  ./scripts/run_local_teleop.sh
-  ./scripts/run_local_teleop.sh --camera-dev /dev/video6
-  ./scripts/run_local_teleop.sh --robot-ip 192.168.1.199 --no-fps-mouse
+  ./record/run_local_teleop.sh
+  ./record/run_local_teleop.sh --camera-dev /dev/video6
+  ./record/run_local_teleop.sh --robot-ip 192.168.1.199 --no-fps-mouse
 EOF
 }
 

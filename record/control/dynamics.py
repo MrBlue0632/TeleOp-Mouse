@@ -5,6 +5,9 @@ computation, plus a **Momentum Observer** (De Luca 2005) that estimates
 external joint torques without differentiating q̇.
 
 Typical per-call latency: ~0.013 ms (capable of >70 kHz).
+
+Inputs: xArm6 joint position, velocity, acceleration, and URDF geometry.
+Returns: rigid-body dynamics torques and observer estimates for record control.
 """
 
 import numpy as np

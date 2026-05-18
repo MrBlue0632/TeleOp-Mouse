@@ -1,4 +1,9 @@
-"""Web dashboard helpers for TeleOp data collection."""
+"""Web dashboard helpers for the record data-collection subsystem.
+
+Inputs: telemetry snapshots, camera frames, config requests, and optional reset
+callbacks from ``record.teleop``. Returns importable server/state helpers for the
+record package and compatibility shims.
+"""
 
 __all__ = [
     "ConfigStore",

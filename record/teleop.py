@@ -1,4 +1,11 @@
 #!/usr/bin/env python3
+"""TeleOp LeRobot data recorder.
+
+Inputs: CLI arguments or direct ``TeleopApp`` construction with robot, camera,
+dataset, torque, and optional web-dashboard settings.
+Returns: recorded LeRobot episodes on disk and optional live telemetry snapshots.
+"""
+
 import argparse
 import collections
 import json
@@ -21,8 +28,8 @@ if REPO_ROOT not in sys.path:
 import cv2
 import numpy as np
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
-from robot_control.torque_estimation import FirmwareBiasTorqueEstimator
-from teleop_web import DashboardState, build_app_snapshot, start_dashboard_server
+from record.control.torque_estimation import FirmwareBiasTorqueEstimator
+from record.web import DashboardState, build_app_snapshot, start_dashboard_server
 from xarm.core.config.x_config import XCONF
 from xarm.wrapper import XArmAPI
 
@@ -1597,7 +1604,7 @@ def self_check():
     return 0
 
 
-def main():
+def main(argv=None):
     parser = argparse.ArgumentParser()
     parser.add_argument("--robot-ip", default="192.168.1.199", help="xArm IP")
     parser.add_argument("--robot-port", type=int, default=502, help="xArm control port")
@@ -1630,7 +1637,7 @@ def main():
     parser.add_argument("--web-port", type=int, default=8765, help="Dashboard bind port")
     parser.add_argument("--web-fps", type=float, default=10.0, help="Max MJPEG publish FPS per camera")
     parser.add_argument("--self-check", action="store_true")
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
     if args.self_check:
         raise SystemExit(self_check())

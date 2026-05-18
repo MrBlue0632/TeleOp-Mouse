@@ -10,7 +10,7 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 try:
-    from scripts import teleop_keyboard_mouse as teleop
+    from record.legacy import teleop_keyboard_mouse as teleop
 except ModuleNotFoundError as exc:
     if (exc.name or "").split(".")[0] in {"cv2", "lerobot", "xarm"}:
         raise unittest.SkipTest(f"{exc.name} is not installed")

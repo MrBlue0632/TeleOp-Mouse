@@ -1,4 +1,8 @@
-"""Torque estimation helpers shared by teleop and diagnostics."""
+"""Torque estimation helpers shared by record teleop and diagnostics.
+
+Inputs: xArm joint position, speed, API torque, and optional compensation model.
+Returns: model, compensation, firmware-bias, and estimated external torque arrays.
+"""
 
 import os
 import time

@@ -1,4 +1,8 @@
-"""Shared constants for xArm6 control."""
+"""Shared constants for xArm6 control runtime.
+
+Inputs: repository asset layout and xArm6 control assumptions.
+Returns: joint, URDF, limit, and torque constants for record control helpers.
+"""
 
 import os
 
@@ -11,7 +15,7 @@ N_JOINTS = 6
 
 # URDF path
 _PKG_DIR = os.path.dirname(os.path.abspath(__file__))
-XARM6_URDF = os.path.join(_PKG_DIR, os.pardir, "assets", "urdf", "xarm6", "xarm6.urdf")
+XARM6_URDF = os.path.join(_PKG_DIR, os.pardir, os.pardir, "assets", "urdf", "xarm6", "xarm6.urdf")
 
 # PyBullet revolute joint indices (joint0=fixed world, 1-6=revolute, 7=fixed eef)
 PB_JOINT_INDICES = [1, 2, 3, 4, 5, 6]

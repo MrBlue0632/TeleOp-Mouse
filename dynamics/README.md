@@ -213,4 +213,4 @@ Torque records add:
 - Only the xArm backend is implemented.
 - UR, Franka, and Kinova currently have capability notes only.
 - `pybullet`, `torch`, `pandas`, and the xArm SDK are required for the full pipeline.
-- `robot_control/dynamics.py` is a separate older runtime module that uses degree-based inputs; do not mix its API with the SI-unit `dynamics/` package without converting units.
+- `record/control/dynamics.py` is the degree-based runtime module used by recording; do not mix its API with the SI-unit dynamics APIs without converting units.

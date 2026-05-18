@@ -8,9 +8,9 @@ from types import SimpleNamespace
 
 import numpy as np
 
-from teleop_web.model import inspect_robot_model
-from teleop_web.server import ConfigStore, DashboardServer, _mock_state
-from teleop_web.telemetry import DashboardState, build_app_snapshot, torque_bar
+from record.web.model import inspect_robot_model
+from record.web.server import ConfigStore, DashboardServer, _mock_state
+from record.web.telemetry import DashboardState, build_app_snapshot, torque_bar
 
 
 class FakeCamera:
@@ -153,8 +153,8 @@ class TeleopWebRobotModelTests(unittest.TestCase):
 class TeleopWebStaticLayoutTests(unittest.TestCase):
     def test_static_layout_prioritizes_vision_and_compacts_robot_view(self):
         repo_root = Path(__file__).resolve().parents[1]
-        html = (repo_root / "teleop_web" / "static" / "index.html").read_text(encoding="utf-8")
-        css = (repo_root / "teleop_web" / "static" / "styles.css").read_text(encoding="utf-8")
+        html = (repo_root / "record" / "web" / "static" / "index.html").read_text(encoding="utf-8")
+        css = (repo_root / "record" / "web" / "static" / "styles.css").read_text(encoding="utf-8")
 
         self.assertIn('class="panel vision-panel primary-vision"', html)
         self.assertIn('class="panel robot-panel compact-robot"', html)
@@ -166,7 +166,7 @@ class TeleopWebStaticLayoutTests(unittest.TestCase):
 
     def test_static_theme_uses_solid_black_gold_without_gradients(self):
         repo_root = Path(__file__).resolve().parents[1]
-        css = (repo_root / "teleop_web" / "static" / "styles.css").read_text(encoding="utf-8")
+        css = (repo_root / "record" / "web" / "static" / "styles.css").read_text(encoding="utf-8")
 
         self.assertNotIn("gradient(", css)
         self.assertIn("--bg: #050403;", css)

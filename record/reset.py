@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Reset a supported robot arm to its configured home position."""
+"""Reset a supported robot arm to its configured home position.
+
+Inputs: robot config, optional connection overrides, and gripper option.
+Returns: a one-shot reset command using the existing dynamics backend API.
+"""
 
 from __future__ import annotations
 

@@ -21,16 +21,16 @@ export PYTHONPATH=~/lerobot/src:$PYTHONPATH
 
 ```bash
 # Collect demo dataset (recommended)
-./scripts/collect_demo.sh
+./record/collect_demo.sh
 
 # Custom task description
-./scripts/collect_demo.sh --task "pick_red_cube"
+./record/collect_demo.sh --task "pick_red_cube"
 
 # Without video window (headless)
-./scripts/collect_demo.sh --no-video
+./record/collect_demo.sh --no-video
 
 # Custom data directory
-./scripts/collect_demo.sh --data-dir ~/my_dataset
+./record/collect_demo.sh --data-dir ~/my_dataset
 ```
 
 ## Controls
@@ -140,5 +140,5 @@ python -m dynamics.main --mode train --model-kind hybrid \
 Use a hybrid checkpoint during teleop:
 
 ```bash
-TELEOP_TORQUE_COMP_MODEL=dynamics/calibration/compensation/hybrid.pt ./scripts/collect_demo.sh
+TELEOP_TORQUE_COMP_MODEL=dynamics/calibration/compensation/hybrid.pt ./record/collect_demo.sh
 ```

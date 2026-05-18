@@ -5,14 +5,14 @@ set -euo pipefail
 #  collect_demo.sh — 采集 demo 数据集
 #
 #  用法:
-#    ./scripts/collect_demo.sh                          # 默认参数
-#    ./scripts/collect_demo.sh --task "pick_red_cube"    # 自定义任务描述
-#    ./scripts/collect_demo.sh --no-video                # 不显示视频窗口
-#    ./scripts/collect_demo.sh --display-camera target   # 显示 target 相机
+#    ./record/collect_demo.sh                          # 默认参数
+#    ./record/collect_demo.sh --task "pick_red_cube"    # 自定义任务描述
+#    ./record/collect_demo.sh --no-video                # 不显示视频窗口
+#    ./record/collect_demo.sh --display-camera target   # 显示 target 相机
 # ============================================================
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-SCRIPT_PATH="${ROOT_DIR}/scripts/teleop.py"
+cd "${ROOT_DIR}"
 
 # ---------- 默认配置 ----------
 ROBOT_IP="${ROBOT_IP:-192.168.1.199}"
@@ -69,7 +69,7 @@ print("[OK] all dependencies available")
 PY
 
 # ---------- 清理旧进程 ----------
-OLD_PIDS="$(pgrep -f "teleop.py|teleop_keyboard_mouse.py" || true)"
+OLD_PIDS="$(pgrep -f "main.py|record.main|record/teleop.py|teleop.py|teleop_keyboard_mouse.py" || true)"
 if [ -n "${OLD_PIDS}" ]; then
     echo "[INFO] stopping stale teleop processes: ${OLD_PIDS}"
     kill ${OLD_PIDS} 2>/dev/null || true
@@ -162,7 +162,7 @@ echo "============================================"
 echo ""
 
 # ---------- 启动遥操作 ----------
-exec python3 "${SCRIPT_PATH}" \
+exec python3 "${ROOT_DIR}/main.py" \
     --robot-ip "${ROBOT_IP}" \
     --robot-port "${ROBOT_PORT}" \
     --report-port-normal "${REPORT_NORM}" \
