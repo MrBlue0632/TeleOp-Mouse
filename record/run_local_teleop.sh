@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-SCRIPT_PATH="${ROOT_DIR}/record/legacy/teleop_keyboard_mouse.py"
+MAIN_PATH="${ROOT_DIR}/main.py"
 DATA_DIR="${ROOT_DIR}/data"
 
 has_local_forward() {
@@ -24,9 +24,9 @@ PY
 
 cleanup_local_teleop() {
   local pids
-  pids="$(pgrep -f "${SCRIPT_PATH}" || true)"
+  pids="$(pgrep -f "${MAIN_PATH}|record.main|record/teleop.py" || true)"
   if [[ -n "${pids}" ]]; then
-    echo "[INFO] stopping stale TeleOp_clean processes: ${pids}"
+    echo "[INFO] stopping stale TeleOp processes: ${pids}"
     kill ${pids} 2>/dev/null || true
     sleep 0.5
     kill -9 ${pids} 2>/dev/null || true
@@ -100,7 +100,7 @@ else
   echo "[INFO] using direct xArm connection at ${ROBOT_IP_VALUE}"
 fi
 
-exec python3 "${SCRIPT_PATH}" \
+exec python3 "${MAIN_PATH}" \
   --robot-ip "${ROBOT_IP_VALUE}" \
   --robot-port "${ROBOT_PORT_VALUE}" \
   --report-port-normal "${REPORT_NORM_VALUE}" \

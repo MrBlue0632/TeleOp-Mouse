@@ -69,7 +69,7 @@ print("[OK] all dependencies available")
 PY
 
 # ---------- 清理旧进程 ----------
-OLD_PIDS="$(pgrep -f "main.py|record.main|record/teleop.py|teleop.py|teleop_keyboard_mouse.py" || true)"
+OLD_PIDS="$(pgrep -f "main.py|record.main|record/teleop.py" || true)"
 if [ -n "${OLD_PIDS}" ]; then
     echo "[INFO] stopping stale teleop processes: ${OLD_PIDS}"
     kill ${OLD_PIDS} 2>/dev/null || true
