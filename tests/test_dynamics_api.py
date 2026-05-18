@@ -19,8 +19,10 @@ class DynamicsApiTests(unittest.TestCase):
         self.assertEqual(config["paths"]["compensation_model"], "dynamics/calibration/compensation/compensation.pt")
         self.assertEqual(config["trajectory"]["kind"], "all")
         self.assertEqual(config["trajectory"]["workspace_points"], 20)
-        self.assertEqual(config["training"]["model_kind"], "baseline")
+        self.assertEqual(config["training"]["model_kind"], "kinematic_history")
         self.assertEqual(config["training"]["epochs"], 200)
+        self.assertEqual(config["compensation"]["kinematic_history"]["channels"], "q_qd")
+        self.assertEqual(config["compensation"]["kinematic_history"]["window_points"], 20)
         self.assertEqual(config["compensation"]["hybrid"]["motion_history_steps"], 3)
 
     def test_global_config_file_is_self_contained(self):
@@ -135,6 +137,11 @@ class DynamicsApiTests(unittest.TestCase):
             motion_history_steps=None,
             hz=100.0,
         )
+
+    def test_parse_args_accepts_kinematic_history_model_kind(self):
+        args = parse_args(["--mode", "train", "--model-kind", "kinematic_history"])
+
+        self.assertEqual(args.model_kind, "kinematic_history")
 
     def test_run_mode_rejects_unknown_mode(self):
         with self.assertRaisesRegex(ValueError, "mode must be one of"):

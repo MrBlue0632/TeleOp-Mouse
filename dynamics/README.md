@@ -121,22 +121,24 @@ python -m dynamics.main --mode torque \
 
 Output: one parquet file under `dynamics/calibration/torque/`, with `source_file` marking which trajectory produced each row.
 
-3. Train a baseline compensation model:
+3. Train a kinematic-history compensation model:
+
+Calibration torque data must be collected without external contact or human-applied force. The arm should only be under its own motion, gravity, and the configured gripper/payload so `tau_api - tau_model` represents internal residual torque.
 
 ```bash
 python -m dynamics.main --mode train \
-  --model-kind baseline \
+  --model-kind kinematic_history \
   --data dynamics/calibration/torque/example.parquet \
-  --model-path dynamics/calibration/compensation/compensation.pt
+  --model-path dynamics/calibration/compensation/history_q_qd.pt
 ```
 
-Output: a `.pt` checkpoint.
+Output: a `.pt` checkpoint. The default input is `q/qd` history shaped `(12, 20)` for xArm6; set `compensation.kinematic_history.channels: q_qd_qdd` to train the `(18, 20)` `q/qd/qdd` variant.
 
 4. Monitor real-time torque:
 
 ```bash
 python -m dynamics.main --mode monitor \
-  --model-path dynamics/calibration/compensation/compensation.pt
+  --model-path dynamics/calibration/compensation/history_q_qd.pt
 ```
 
 Output: live terminal values for joint state, API torque, model torque, compensation, and residual error.
@@ -172,17 +174,18 @@ Output: live terminal values for joint state, API torque, model torque, compensa
 
 | File | Purpose | Main Input | Main Output |
 | --- | --- | --- | --- |
+| `calibration/compensation/history.py` | Kinematic-history temporal CNN | `q/qd` or `q/qd/qdd` history plus residual targets | `KinematicHistoryCompensator`, `.pt` |
 | `calibration/compensation/mlp.py` | Baseline MLP compensation | `q`, `qd`, `qdd`, `tau_api`, `tau_model` | `CompensationBundle`, `.pt` |
 | `calibration/compensation/hybrid.py` | Hybrid compensation model | Motion/static/stop torque data | `HybridTorqueCompensator`, `.pt` |
 | `calibration/compensation/static_bias.py` | Position-dependent static bias | Static `q`, residual torque | Static bias prediction |
 | `calibration/compensation/firmware_state.py` | Delayed jump state and fitted levels | Residuals for fitting, kinematics for runtime | Jump bias and stop-state estimates |
 | `calibration/compensation/per_joint_mlp.py` | Per-joint motion residual MLPs | Current and historical `q/qd/qdd` features | Motion compensation prediction |
-| `calibration/compensation/__init__.py` | Unified checkpoint loader | `.pt` path | Baseline or hybrid model |
+| `calibration/compensation/__init__.py` | Unified checkpoint loader | `.pt` path | Kinematic-history, baseline, or hybrid model |
 
-Hybrid checkpoints are trained to predict `tau_api - tau_model` from no-force data. At runtime the prediction path uses only `q`, `qd`, `qdd`, timestamps, and short kinematic history; `tau_api` is used only to compute the final residual:
+Kinematic-history checkpoints are trained to predict `tau_api - tau_model` from no-force data. Runtime prediction uses only kinematic history: the default B variant uses `q/qd` with shape `(12, 20)` for xArm6, while the A variant uses `q/qd/qdd` with shape `(18, 20)`. `tau_api` is used only to compute the final residual:
 
 ```text
-tau_external = tau_api - (tau_model + tau_static + tau_motion + tau_jump_delay)
+tau_external = tau_api - tau_model - tau_comp
 ```
 
 Compensation checkpoints saved through the training workflow include an `embodiment` fingerprint with robot name, active joint names, URDF hash, payload profile, and SI-unit conventions. Runtime torque collection and monitoring load checkpoints through the config-aware loader, so a checkpoint trained for another embodiment is rejected before use.

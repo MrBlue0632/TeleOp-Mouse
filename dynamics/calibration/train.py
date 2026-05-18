@@ -8,6 +8,7 @@ from pathlib import Path
 from dynamics.embodiment import build_embodiment_metadata
 from dynamics.resolver import resolve_robot
 
+from .compensation.history import train_kinematic_history_model
 from .compensation.hybrid import train_hybrid_compensator
 from .compensation.mlp import save_compensation, train_compensation
 from .io import extract_matrix, latest_parquet, read_parquet
@@ -78,6 +79,7 @@ def train_from_torque_data(
     training_cfg = _section(config, "training")
     compensation_cfg = _section(config, "compensation")
     hybrid_cfg = _section(compensation_cfg, "hybrid")
+    history_cfg = _section(compensation_cfg, "kinematic_history")
 
     data_path = _coalesce(data_path, training_cfg.get("data_path"))
     output_path = _coalesce(output_path, paths.get("compensation_model"), "dynamics/calibration/compensation/compensation.pt")
@@ -98,6 +100,9 @@ def train_from_torque_data(
     firmware_settle_lambda_threshold = float(_coalesce(hybrid_cfg.get("settle_lambda_threshold"), 0.05))
     firmware_detect_ema_alpha = float(_coalesce(hybrid_cfg.get("detect_ema_alpha"), 0.05))
     firmware_j3_jump_size = float(_coalesce(hybrid_cfg.get("j3_jump_size_nm"), 5.28))
+    history_channels = str(_coalesce(history_cfg.get("channels"), "q_qd"))
+    history_control_hz = float(_coalesce(history_cfg.get("control_hz"), config.get("sampling_hz"), 100.0))
+    history_window_points = int(_coalesce(history_cfg.get("window_points"), 20))
 
     joint_count = int(config.get("joint_count", 6))
     torque_file = resolve_torque_path(data_path, torque_dir=paths.get("torque_dir", "dynamics/calibration/torque"))
@@ -157,8 +162,28 @@ def train_from_torque_data(
         print(f"[TRAIN] saved hybrid compensation model to {path}; metadata={metadata}")
         return path
 
+    if model_kind == "kinematic_history":
+        bundle, metadata = train_kinematic_history_model(
+            q=q,
+            qd=qd,
+            qdd=qdd,
+            tau_api=tau_api,
+            tau_model=tau_theory,
+            channels=history_channels,
+            control_hz=history_control_hz,
+            window_points=history_window_points,
+            epochs=epochs,
+            lr=lr,
+            hidden_dim=hidden_dim,
+            seed=seed,
+            embodiment=embodiment,
+        )
+        path = bundle.save(output_path)
+        print(f"[TRAIN] saved kinematic-history compensation model to {path}; metadata={metadata}")
+        return path
+
     if model_kind != "baseline":
-        raise ValueError("model_kind must be baseline or hybrid")
+        raise ValueError("model_kind must be baseline, hybrid, or kinematic_history")
 
     bundle, losses = train_compensation(
         q,

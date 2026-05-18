@@ -50,7 +50,7 @@ training:
   data_path:
   static_data_path:
   stop_data_path:
-  model_kind: baseline
+  model_kind: kinematic_history
   target: residual
   epochs: 200
   lr: 0.001
@@ -58,6 +58,10 @@ training:
   seed: 7
 
 compensation:
+  kinematic_history:
+    channels: q_qd
+    control_hz: 100.0
+    window_points: 20
   hybrid:
     static_alpha: 1.0
     speed_threshold_deg_s: 2.0

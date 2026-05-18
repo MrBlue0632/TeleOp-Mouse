@@ -119,26 +119,30 @@ print(dataset[0])  # First frame
 | `VCODEC` | `libsvtav1` | Video codec |
 | `CAMERA_ID` | `1` | Camera device index |
 
-## Hybrid Torque Compensation
+## Torque Compensation
 
-Train the legacy baseline MLP:
+Compensation training data must be collected with no external contact or human-applied force. During these calibration trajectories the arm should only be affected by its own motion, gravity, and the configured gripper/payload. Under that assumption, `tau_api - tau_model` is treated as an internal residual/bias target, not as real external force.
+
+Train the default kinematic-history compensator. This uses the recommended B variant: `q/qd` only, 20 points from the current sample back through the 1.9 s history at 0.1 s spacing, and a `(6,)` joint-torque compensation output.
+
+```bash
+python -m dynamics.main --mode train \
+  --model-kind kinematic_history \
+  --data dynamics/calibration/torque/example.parquet \
+  --model-path dynamics/calibration/compensation/history_q_qd.pt
+```
+
+To evaluate the A variant, set `compensation.kinematic_history.channels: q_qd_qdd` in the dynamics config before training. The A variant adds `qdd` history but is more sensitive to differentiation noise.
+
+Legacy models remain available for comparison:
 
 ```bash
 python -m dynamics.main --mode train --model-kind baseline --data dynamics/calibration/torque/example.parquet
+python -m dynamics.main --mode train --model-kind hybrid --data dynamics/calibration/torque/motion.parquet
 ```
 
-Train the hybrid per-joint compensator:
+Use a checkpoint during teleop:
 
 ```bash
-python -m dynamics.main --mode train --model-kind hybrid \
-  --data dynamics/calibration/torque/motion.parquet \
-  --static-data dynamics/calibration/torque/static.parquet \
-  --stop-data dynamics/calibration/torque/stop.parquet \
-  --model-path dynamics/calibration/compensation/hybrid.pt
-```
-
-Use a hybrid checkpoint during teleop:
-
-```bash
-TELEOP_TORQUE_COMP_MODEL=dynamics/calibration/compensation/hybrid.pt ./record/collect_demo.sh
+TELEOP_TORQUE_COMP_MODEL=dynamics/calibration/compensation/history_q_qd.pt ./record/collect_demo.sh
 ```

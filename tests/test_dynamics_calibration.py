@@ -114,6 +114,102 @@ class CompensationTests(unittest.TestCase):
             )
         return records
 
+    def test_history_window_builder_preserves_current_to_oldest_order(self):
+        from dynamics.calibration.compensation.history import build_history_windows
+
+        q = np.column_stack([np.arange(5, dtype=np.float64), np.arange(10, 15, dtype=np.float64)])
+        qd = q + 100.0
+        qdd = q + 200.0
+
+        windows, indices = build_history_windows(
+            q,
+            qd,
+            qdd,
+            control_hz=10.0,
+            channels="q_qd",
+            window_points=3,
+        )
+
+        self.assertEqual(windows.shape, (3, 4, 3))
+        np.testing.assert_array_equal(indices, [2, 3, 4])
+        np.testing.assert_allclose(windows[0, 0], [2.0, 1.0, 0.0])
+        np.testing.assert_allclose(windows[0, 1], [12.0, 11.0, 10.0])
+        np.testing.assert_allclose(windows[0, 2], [102.0, 101.0, 100.0])
+        np.testing.assert_allclose(windows[0, 3], [112.0, 111.0, 110.0])
+
+    def test_history_window_builder_rejects_non_10hz_multiple_control_rate(self):
+        from dynamics.calibration.compensation.history import build_history_windows
+
+        q = np.zeros((5, 2), dtype=np.float64)
+
+        with self.assertRaisesRegex(ValueError, "integer multiple of 10 Hz"):
+            build_history_windows(q, q, q, control_hz=125.0, channels="q_qd", window_points=3)
+
+    def test_kinematic_history_runtime_warms_up_before_predicting(self):
+        from dynamics.calibration.compensation.history import KinematicHistoryCompensator
+
+        comp = KinematicHistoryCompensator.zeros(
+            joint_count=2,
+            channels="q_qd",
+            control_hz=10.0,
+            window_points=3,
+            hidden_dim=4,
+        )
+        q = np.array([0.1, -0.2])
+        qd = np.array([0.01, -0.02])
+        qdd = np.array([0.0, 0.0])
+        tau_api = np.array([1.0, 2.0])
+        tau_model = np.array([0.5, 0.4])
+
+        first = comp.update(q, qd, qdd, tau_api, tau_model, timestamp=0.0)
+        second = comp.update(q, qd, qdd, tau_api, tau_model, timestamp=0.1)
+        third = comp.update(q, qd, qdd, tau_api, tau_model, timestamp=0.2)
+
+        self.assertFalse(first.is_ready)
+        self.assertFalse(second.is_ready)
+        self.assertTrue(third.is_ready)
+        np.testing.assert_allclose(first.tau_comp, [0.0, 0.0])
+        np.testing.assert_allclose(second.tau_comp, [0.0, 0.0])
+        self.assertEqual(third.tau_comp.shape, (2,))
+
+    def test_train_save_load_kinematic_history_variants_predict_joint_compensation(self):
+        from dynamics.calibration.compensation import load_compensation as load_any_compensation
+        from dynamics.calibration.compensation.history import train_kinematic_history_model
+
+        rng = np.random.default_rng(5)
+        n = 12
+        j = 2
+        q = rng.normal(scale=0.2, size=(n, j))
+        qd = rng.normal(scale=0.1, size=(n, j))
+        qdd = rng.normal(scale=0.05, size=(n, j))
+        tau_model = 0.2 * np.sin(q)
+        residual = np.column_stack([0.3 * q[:, 0] + 0.1 * qd[:, 0], -0.2 * q[:, 1] + 0.05 * qd[:, 1]])
+        tau_api = tau_model + residual
+
+        for channels in ("q_qd", "q_qd_qdd"):
+            bundle, metadata = train_kinematic_history_model(
+                q=q,
+                qd=qd,
+                qdd=qdd,
+                tau_api=tau_api,
+                tau_model=tau_model,
+                channels=channels,
+                control_hz=10.0,
+                window_points=3,
+                epochs=2,
+                hidden_dim=8,
+                seed=3,
+            )
+            self.assertEqual(metadata["channels"], channels)
+            pred = bundle.predict_compensation(q[-1], qd[-1], qdd[-1])
+            self.assertEqual(pred.shape, (j,))
+
+            with tempfile.TemporaryDirectory() as tmp:
+                path = bundle.save(f"{tmp}/{channels}.pt")
+                loaded = load_any_compensation(path)
+                loaded_pred = loaded.predict_compensation(q[-1], qd[-1], qdd[-1])
+            self.assertEqual(loaded_pred.shape, (j,))
+
     def test_embodiment_metadata_includes_robot_identity(self):
         from dynamics.embodiment import build_embodiment_metadata
 
@@ -140,6 +236,7 @@ class CompensationTests(unittest.TestCase):
                 config,
                 data_path=data_path,
                 output_path=Path(tmp) / "baseline.pt",
+                model_kind="baseline",
                 epochs=1,
                 hidden_dim=4,
             )
@@ -352,6 +449,32 @@ class CompensationTests(unittest.TestCase):
 
         np.testing.assert_allclose(motion_model.history_features[0], [[0.0, 0.0, 0.0, 0.0, 0.0, 0.0]])
         np.testing.assert_allclose(motion_model.history_features[1], [[0.1, 0.2, 0.3, 0.4, 0.5, 0.6]])
+
+    def test_train_from_torque_data_uses_kinematic_history_config(self):
+        class FakeHistoryBundle:
+            def save(self, path):
+                return Path(path)
+
+        config = {
+            "joint_count": 2,
+            "sampling_hz": 120.0,
+            "paths": {"compensation_model": "history.pt"},
+            "training": {"model_kind": "kinematic_history", "epochs": 4, "lr": 0.03, "hidden_dim": 10, "seed": 13},
+            "compensation": {"kinematic_history": {"channels": "q_qd_qdd", "control_hz": 120.0, "window_points": 3}},
+        }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            data_path = write_parquet(self.make_torque_records(joint_count=2, rows=40), Path(tmp) / "torque.parquet")
+            with patch("dynamics.calibration.train.train_kinematic_history_model", return_value=(FakeHistoryBundle(), {})) as train:
+                out = train_from_torque_data(config, data_path=data_path)
+
+        self.assertEqual(out, Path("history.pt"))
+        kwargs = train.call_args.kwargs
+        self.assertEqual(kwargs["channels"], "q_qd_qdd")
+        self.assertEqual(kwargs["control_hz"], 120.0)
+        self.assertEqual(kwargs["window_points"], 3)
+        self.assertEqual(kwargs["epochs"], 4)
+        self.assertEqual(kwargs["hidden_dim"], 10)
 
     def test_train_from_torque_data_accepts_tau_model_columns(self):
         records = []
