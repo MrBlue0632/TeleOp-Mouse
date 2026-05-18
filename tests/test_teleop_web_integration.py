@@ -53,6 +53,15 @@ class TeleopWebIntegrationTests(unittest.TestCase):
         self.assertFalse((ROOT / "dynamics" / "robot_model.py").exists())
         self.assertFalse((ROOT / "dynamics" / "torque_estimation.py").exists())
         self.assertFalse((ROOT / "dynamics" / "reset.py").exists())
+        self.assertFalse((ROOT / "record" / "reset.py").exists())
+
+    def test_tools_folder_owns_standalone_reset_script(self):
+        reset_tool = ROOT / "tools" / "reset.py"
+
+        self.assertTrue(reset_tool.is_file())
+        content = reset_tool.read_text(encoding="utf-8")
+        self.assertIn("from dynamics.backends import create_backend", content)
+        self.assertIn("backend.reset_home", content)
 
     def test_record_control_urdf_path_points_to_assets(self):
         from record.control.constants import XARM6_URDF
