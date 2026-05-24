@@ -25,6 +25,10 @@ WEB_DASHBOARD="${WEB_DASHBOARD:-0}"
 WEB_HOST="${WEB_HOST:-127.0.0.1}"
 WEB_PORT="${WEB_PORT:-8765}"
 WEB_FPS="${WEB_FPS:-10}"
+DEFAULT_TORQUE_COMP_MODEL="${ROOT_DIR}/dynamics/calibration/compensation/history_q_qd.pt"
+if [ -z "${TELEOP_TORQUE_COMP_MODEL:-}" ] && [ -f "${DEFAULT_TORQUE_COMP_MODEL}" ]; then
+    export TELEOP_TORQUE_COMP_MODEL="${DEFAULT_TORQUE_COMP_MODEL}"
+fi
 
 # ---------- 相机配置 ----------
 WRIST_CAM_ID="${WRIST_CAM_ID:-10}"
@@ -93,9 +97,16 @@ while [[ $# -gt 0 ]]; do
         --web-host)        WEB_HOST="$2"; shift 2 ;;
         --web-port)        WEB_PORT="$2"; shift 2 ;;
         --web-fps)         WEB_FPS="$2"; shift 2 ;;
+        --torque-comp-model) TELEOP_TORQUE_COMP_MODEL="$2"; export TELEOP_TORQUE_COMP_MODEL; shift 2 ;;
+        --no-torque-comp)  unset TELEOP_TORQUE_COMP_MODEL; shift ;;
         *)                 EXTRA_ARGS+=("$1"); shift ;;
     esac
 done
+
+if [ -n "${TELEOP_TORQUE_COMP_MODEL:-}" ] && [ ! -f "${TELEOP_TORQUE_COMP_MODEL}" ]; then
+    echo "[ERROR] configured torque compensation model not found: ${TELEOP_TORQUE_COMP_MODEL}" >&2
+    exit 1
+fi
 
 WEB_ARGS=(--web-host "${WEB_HOST}" --web-port "${WEB_PORT}" --web-fps "${WEB_FPS}")
 if [[ "${WEB_DASHBOARD}" == "1" || "${WEB_DASHBOARD}" == "true" || "${WEB_DASHBOARD}" == "TRUE" ]]; then
@@ -141,6 +152,7 @@ echo "  FPS           : ${RATE_HZ}"
 echo "  Codec         : ${VCODEC}"
 echo "  Web Dashboard : ${WEB_DASHBOARD} (${WEB_HOST}:${WEB_PORT}, ${WEB_FPS} fps)"
 echo "  Torque Data   : raw/model/external/bias + EE wrench"
+echo "  Torque Model  : ${TELEOP_TORQUE_COMP_MODEL:-none}"
 echo "  ---"
 echo "  Wrist Camera  : ${WRIST_CAM_DEV}"
 echo "  Base Camera   : ${BASE_CAM_DEV}"

@@ -33,6 +33,17 @@ def _coerce_speed_to_rad(values: Any, count: int) -> np.ndarray:
     return arr
 
 
+def _payload_tcp_load(config: dict[str, Any]) -> tuple[float, tuple[float, float, float]] | None:
+    """Return xArm TCP load settings from the configured payload profile."""
+    from dynamics.resolver import payload_from_config
+
+    payload = payload_from_config(config.get("payload"))
+    if payload is None:
+        return None
+    center_of_gravity_mm = tuple(float(value) * 1000.0 for value in payload.com_xyz_m)
+    return float(payload.mass_kg), center_of_gravity_mm
+
+
 @dataclass
 class XArmBackend:
     ip: str
@@ -43,6 +54,7 @@ class XArmBackend:
     report_port_rich: int = 30002
     report_port_real: int = 30003
     sdk_timeout_s: float = 0.5
+    tcp_load: tuple[float, tuple[float, float, float]] | None = None
 
     arm: Any | None = None
 
@@ -58,6 +70,7 @@ class XArmBackend:
             report_port_rich=int(conn.get("report_port_rich", 30002)),
             report_port_real=int(conn.get("report_port_real", 30003)),
             sdk_timeout_s=float(conn.get("sdk_timeout_s", 0.5)),
+            tcp_load=_payload_tcp_load(config),
         )
 
     def connect(self) -> None:
@@ -75,6 +88,7 @@ class XArmBackend:
             raise RuntimeError(f"failed to connect xArm at {self.ip}:{self.robot_port}")
         self.arm.set_timeout(self.sdk_timeout_s)
         self._ensure_ready()
+        self._apply_tcp_load()
         try:
             self.arm.set_report_tau_or_i(tau_or_i=0)
         except Exception:
@@ -94,6 +108,15 @@ class XArmBackend:
             arm.set_state(0)
         except Exception:
             pass
+
+    def _apply_tcp_load(self) -> None:
+        if self.tcp_load is None:
+            return
+        arm = self._require_arm()
+        weight_kg, center_of_gravity_mm = self.tcp_load
+        ret = arm.set_tcp_load(float(weight_kg), list(center_of_gravity_mm), wait=True)
+        if isinstance(ret, int) and ret != 0:
+            raise RuntimeError(f"xArm set_tcp_load failed with code {ret}")
 
     def close(self) -> None:
         if self.arm is not None:
