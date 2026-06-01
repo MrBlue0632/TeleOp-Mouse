@@ -39,9 +39,9 @@ export PYTHONPATH=~/lerobot/src:$PYTHONPATH
 |-----|----------|
 | W/S | Forward / Backward |
 | A/D | Left / Right |
-| Space/Shift | Down / Up |
+| Space/Shift | Up / Down |
 | Q/E | Rotate Z-axis |
-| Mouse move | Rotate X/Y-axis (pitch/yaw) |
+| Mouse move | Horizontal yaw RZ, vertical pitch RY |
 | Left click | Toggle gripper |
 | Right click | Open gripper (gradual) |
 | Tab | Toggle BASE / TOOL coordinate frame |
@@ -76,10 +76,11 @@ data/lerobot_dataset/
 | `observation.images.wrist` | (480,640,3) | Wrist camera (video) |
 | `observation.images.base` | (480,640,3) | Base camera (video) |
 | `observation.joints_deg` | (6,) | Joint angles in degrees |
+| `observation.joint_velocities_deg_s` | (6,) | Joint velocity `qd` in deg/s |
 | `observation.pose_xyzrpy_deg` | (6,) | End-effector pose |
 | `observation.torques` | (7,) | Raw API joint torques |
 | `observation.torques_filtered` | (7,) | Filtered joint torques |
-| `observation.torque_external` | (6,) | Estimated external joint torques |
+| `observation.torque_external` | (6,) | Admittance-control external joint torques after dead-zone + EMA filter |
 | `observation.torque_model` | (6,) | Gravity + Coriolis model torque |
 | `observation.torque_static_bias` | (6,) | Position-dependent static residual compensation |
 | `observation.torque_motion_comp` | (6,) | Motion residual compensation |
@@ -141,7 +142,7 @@ python -m dynamics.main --mode train --model-kind baseline --data dynamics/calib
 python -m dynamics.main --mode train --model-kind hybrid --data dynamics/calibration/torque/motion.parquet
 ```
 
-Use a checkpoint during teleop:
+Use a validated checkpoint during teleop only when its calibration workspace matches the task workspace. Runtime compensation is guarded; if the model output exceeds `TELEOP_TORQUE_COMP_MAX_ABS_NM` (default 25 Nm), teleop falls back to the direct admittance external-torque estimator. `record/collect_demo.sh` auto-enables `dynamics/calibration/compensation/history_q_qd.pt` when that file exists; pass `--no-torque-comp` to disable it.
 
 ```bash
 TELEOP_TORQUE_COMP_MODEL=dynamics/calibration/compensation/history_q_qd.pt ./record/collect_demo.sh

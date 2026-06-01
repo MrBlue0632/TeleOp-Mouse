@@ -73,11 +73,24 @@ print("[OK] all dependencies available")
 PY
 
 # ---------- 清理旧进程 ----------
-OLD_PIDS="$(pgrep -f "main.py|record.main|record/teleop.py" || true)"
+OLD_PIDS="$(pgrep -f "main.py|record.main|record/teleop.py|admittance_control.py" || true)"
 if [ -n "${OLD_PIDS}" ]; then
-    echo "[INFO] stopping stale teleop processes: ${OLD_PIDS}"
-    kill ${OLD_PIDS} 2>/dev/null || true
-    sleep 0.5
+    echo "[INFO] stopping stale teleop/admittance processes: ${OLD_PIDS}"
+    kill -INT ${OLD_PIDS} 2>/dev/null || true
+    for _ in $(seq 1 60); do
+        STILL_RUNNING=""
+        for pid in ${OLD_PIDS}; do
+            if kill -0 "${pid}" 2>/dev/null; then
+                STILL_RUNNING="1"
+                break
+            fi
+        done
+        [ -z "${STILL_RUNNING}" ] && break
+        sleep 0.5
+    done
+    if [ -n "${STILL_RUNNING:-}" ]; then
+        echo "[WARN] stale process still running after SIGINT: ${OLD_PIDS}"
+    fi
 fi
 
 # ---------- 解析参数 ----------
@@ -151,8 +164,8 @@ echo "  Task          : ${TASK}"
 echo "  FPS           : ${RATE_HZ}"
 echo "  Codec         : ${VCODEC}"
 echo "  Web Dashboard : ${WEB_DASHBOARD} (${WEB_HOST}:${WEB_PORT}, ${WEB_FPS} fps)"
-echo "  Torque Data   : raw/model/external/bias + EE wrench"
-echo "  Torque Model  : ${TELEOP_TORQUE_COMP_MODEL:-none}"
+echo "  Torque Data   : admittance external/model/bias + EE wrench"
+echo "  Torque Model  : ${TELEOP_TORQUE_COMP_MODEL:-none} (optional; guarded at ${TELEOP_TORQUE_COMP_MAX_ABS_NM:-25} Nm)"
 echo "  ---"
 echo "  Wrist Camera  : ${WRIST_CAM_DEV}"
 echo "  Base Camera   : ${BASE_CAM_DEV}"
@@ -163,7 +176,7 @@ echo ""
 echo "  Controls:"
 echo "    WASD/Space/Shift  — move end-effector"
 echo "    Q/E               — rotate Z-axis"
-echo "    Mouse move        — rotate X/Y-axis"
+echo "    Mouse move        — horizontal yaw RZ, vertical pitch RY"
 echo "    Left click        — toggle gripper"
 echo "    Tab               — toggle BASE/TOOL frame"
 echo "    1/2/3             — speed 0.5x/1x/2x"

@@ -102,8 +102,9 @@ def estimate_wrench(tau_ext, J, reg=0.01):
 
 RESET_HOME_JOINTS_DEG = [14.1, -8.0, -24.7, 196.9, 62.3, -8.8]
 RESET_HOME_GRIPPER = 840.0
-PANEL_JOINT_MAX = np.array([2.8, 9.7, 5.6, 1.9, 1.6, 1.3], dtype=np.float64)
-PANEL_GRIPPER_MAX = 1.0
+PANEL_TORQUE_MAX_NM = 10.0
+PANEL_GREEN_NM = 2.0
+PANEL_YELLOW_NM = 5.0
 SPEED_PRESETS = {
     "1": 0.5,
     "2": 1.0,
@@ -299,7 +300,7 @@ class TkVideoWindow:
 
 
 class TeleopApp:
-    def __init__(self, robot_ip, rate_hz, control_hz, data_dir, camera_id, camera_dev, base_camera_id, base_camera_dev, target_camera_id, target_camera_dev, display_camera, strict_camera_dev, show_video, fps_mouse, sdk_timeout_s, video_hz, repo_id, task, vcodec, encoder_threads, encoder_queue_maxsize, torque_comp_model=None, web_dashboard=False, web_host="127.0.0.1", web_port=8765, web_fps=10.0):
+    def __init__(self, robot_ip, rate_hz, control_hz, data_dir, camera_id, camera_dev, base_camera_id, base_camera_dev, target_camera_id, target_camera_dev, display_camera, strict_camera_dev, show_video, fps_mouse, sdk_timeout_s, video_hz, repo_id, task, vcodec, encoder_threads, encoder_queue_maxsize, torque_comp_model=None, web_dashboard=False, web_host="127.0.0.1", web_port=8765, web_fps=10.0, start_reset=True):
         self.robot_ip = robot_ip
         self.rate_hz = rate_hz
         self.control_hz = float(control_hz)
@@ -329,6 +330,7 @@ class TeleopApp:
         self.dashboard_state = None
         self.dashboard_server = None
         self.last_diag = {}
+        self.start_reset = bool(start_reset)
         self.camera_probe_timeout_s = 1.8
 
         # 2x faster than previous defaults, while still conservative
@@ -363,8 +365,11 @@ class TeleopApp:
         self.pose_dirty = False
         self.ee_force = np.zeros(6, dtype=np.float64)  # [Fx,Fy,Fz,Tx,Ty,Tz]
         self.ee_force_ema = 0.1  # EMA filter coefficient
-        self.torque_estimator = FirmwareBiasTorqueEstimator(compensation_path=self.torque_comp_model)
-        if getattr(self.torque_estimator, "hybrid", None) is not None:
+        self.torque_estimator = FirmwareBiasTorqueEstimator(
+            compensation_path=self.torque_comp_model,
+            compensation_sample_hz=self.rate_hz,
+        )
+        if getattr(self.torque_estimator, "compensator", None) is not None or getattr(self.torque_estimator, "hybrid", None) is not None:
             self.dashboard_torque_mode = "compensation_model"
             self.dashboard_torque_note = "loaded compensation checkpoint"
         elif getattr(self.torque_estimator, "hybrid_error", None):
@@ -381,9 +386,27 @@ class TeleopApp:
             "tau_motion_comp": np.zeros(6, dtype=np.float64),
             "tau_firmware_bias": np.zeros(6, dtype=np.float64),
             "tau_external": np.zeros(6, dtype=np.float64),
+            "tau_external_raw": np.zeros(6, dtype=np.float64),
+            "tau_external_deadzone": np.zeros(6, dtype=np.float64),
             "time_since_stop": np.zeros(6, dtype=np.float64),
             "firmware_state": np.zeros(6, dtype=np.float64),
+            "compensation_enabled": False,
+            "compensation_used": False,
+            "compensation_ready": False,
+            "compensation_rejected": False,
+            "compensation_kind": "none",
+            "compensation_error": None,
         }
+        if self.torque_estimator.compensator is not None:
+            print(
+                f"[TORQUE] admittance external torque enabled; "
+                f"compensation={self.torque_estimator.compensation_kind} "
+                f"path={self.torque_estimator.compensation_path}"
+            )
+        elif self.torque_estimator.hybrid_error:
+            print(f"[WARN] torque compensation disabled: {self.torque_estimator.hybrid_error}")
+        else:
+            print("[TORQUE] admittance external torque using firmware-bias fallback (no compensation model)")
         # Numerical differentiation state for q_dot, q_ddot
         self._q_prev = None       # previous joint angles (deg)
         self._t_prev = None       # previous timestamp (s)
@@ -452,7 +475,8 @@ class TeleopApp:
         self.arm.set_report_tau_or_i(tau_or_i=0)  # report joint torques instead of currents
         self.arm.set_mode(0)
         self.arm.set_state(0)
-        self.reset_to_home_on_start()
+        if self.start_reset:
+            self.reset_to_home_on_start()
         self.enter_realtime_velocity_mode()
 
         pret = self.arm.get_position(is_radian=False)
@@ -465,6 +489,7 @@ class TeleopApp:
         self.last_state = {
             "ts": time.time(),
             "joints_deg": [0.0] * 6,
+            "joint_velocities_deg_s": [0.0] * 6,
             "pose_xyzrpy_deg": list(self.target_pose),
             "gripper_pos": float(self.gripper_pos),
             "torques": [0.0] * 7,
@@ -512,6 +537,11 @@ class TeleopApp:
                 "names": ["height", "width", "channels"],
             },
             "observation.joints_deg": {
+                "dtype": "float32",
+                "shape": (6,),
+                "names": ["J1", "J2", "J3", "J4", "J5", "J6"],
+            },
+            "observation.joint_velocities_deg_s": {
                 "dtype": "float32",
                 "shape": (6,),
                 "names": ["J1", "J2", "J3", "J4", "J5", "J6"],
@@ -594,7 +624,7 @@ class TeleopApp:
                 stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
                 root = os.path.join(self.data_dir, f"lerobot_torque_dataset_{stamp}")
                 print(
-                    "[WARN] existing dataset schema does not contain torque fields; "
+                    "[WARN] existing dataset schema is missing new observation fields; "
                     f"creating new dataset at {root}"
                 )
 
@@ -883,6 +913,7 @@ class TeleopApp:
 
     def capture_episode_observation(self, state):
         joints = [float(x) for x in state.get("joints_deg", [0.0] * 6)]
+        joint_velocities = [float(x) for x in state.get("joint_velocities_deg_s", [0.0] * 6)]
         gripper = float(state.get("gripper_pos", 0.0))
         torques = [float(x) for x in state.get("torques", [0.0] * 7)]
         obs_state = np.array(joints + [gripper] + torques, dtype=np.float32)
@@ -917,6 +948,7 @@ class TeleopApp:
             "observation.images.base": base_frame,
             "observation.images.target": target_frame,
             "observation.joints_deg": np.array(joints, dtype=np.float32),
+            "observation.joint_velocities_deg_s": np.array(joint_velocities, dtype=np.float32),
             "observation.pose_xyzrpy_deg": np.array(pose, dtype=np.float32),
             "observation.torques": np.array(torques, dtype=np.float32),
             "observation.torques_filtered": np.array(torques_filtered, dtype=np.float32),
@@ -1037,30 +1069,43 @@ class TeleopApp:
 
     def draw_current_panel(self, panel):
         panel[:] = (22, 24, 28)
-        labels = ["J1", "J2", "J3", "J4", "J5", "J6", "GRIP"]
+        labels = ["J1", "J2", "J3", "J4", "J5", "J6"]
         h, w = panel.shape[:2]
-        top = 32
-        row_h = (h - 48) // len(labels)
-        bar_x = 200
+        top = 34
+        row_h = (h - 54) // len(labels)
+        bar_x = 188
         bar_w = w - bar_x - 16
-        raw_curr = self.last_state.get("torques", [0.0] * 7)
-        cv2.putText(panel, "Torques (Nm)", (12, 22), cv2.FONT_HERSHEY_SIMPLEX, 0.62, (210, 210, 220), 1)
+        tau = self.last_state.get("torque_external", [0.0] * 6)
+        cv2.putText(panel, "Admittance Tau (Nm)", (12, 22), cv2.FONT_HERSHEY_SIMPLEX, 0.58, (210, 210, 220), 1)
         for i, lab in enumerate(labels):
             y = top + i * row_h
-            val = float(abs(raw_curr[i]))
+            val = float(abs(tau[i]))
             cv2.putText(panel, lab, (14, y + 20), cv2.FONT_HERSHEY_SIMPLEX, 0.66, (220, 220, 220), 1)
-            txt = f"{val:.2f}"
-            cv2.putText(panel, txt, (120, y + 20), cv2.FONT_HERSHEY_SIMPLEX, 0.60, (235, 235, 235), 1)
-            vmax = float(PANEL_GRIPPER_MAX if i == 6 else PANEL_JOINT_MAX[i])
-            ratio = min(1.0, val / max(vmax, 1e-6))
+            cv2.putText(panel, f"{val:.2f}", (108, y + 20), cv2.FONT_HERSHEY_SIMPLEX, 0.60, (235, 235, 235), 1)
+            ratio = min(1.0, val / PANEL_TORQUE_MAX_NM)
             fill = int(bar_w * ratio)
             cv2.rectangle(panel, (bar_x, y + 4), (bar_x + bar_w, y + 24), (70, 70, 78), -1)
-            color = (50, 190, 255) if ratio < 0.75 else (60, 120, 255)
+            if val < PANEL_GREEN_NM:
+                color = (70, 220, 110)
+            elif val <= PANEL_YELLOW_NM:
+                color = (0, 210, 255)
+            else:
+                color = (60, 80, 240)
             cv2.rectangle(panel, (bar_x, y + 4), (bar_x + fill, y + 24), color, -1)
             cv2.rectangle(panel, (bar_x, y + 4), (bar_x + bar_w, y + 24), (110, 110, 120), 1)
 
-        lam = float(self.last_state.get("torque_lambda", 0.0))
-        cv2.putText(panel, f"bias lambda:{lam:.2f}", (14, h - 14), cv2.FONT_HERSHEY_SIMPLEX, 0.58, (70, 220, 110), 1)
+        enabled = bool(self.last_state.get("torque_compensation_enabled", False))
+        used = bool(self.last_state.get("torque_compensation_used", False))
+        kind = self.last_state.get("torque_compensation_kind", "none")
+        rejected = bool(self.last_state.get("torque_compensation_rejected", False))
+        if enabled and rejected:
+            comp = f"comp:{kind} rejected"
+        elif enabled:
+            comp = f"comp:{kind} {'ready' if used else 'warmup'}"
+        else:
+            comp = "comp:fallback"
+        cv2.putText(panel, f"max10  <2 green  2-5 yellow  >5 red", (14, h - 28), cv2.FONT_HERSHEY_SIMPLEX, 0.46, (210, 210, 220), 1)
+        cv2.putText(panel, comp[:34], (14, h - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.48, (70, 220, 110) if used else (0, 210, 255), 1)
 
     def _get_display_camera(self):
         """Return the camera stream used for the video display panel."""
@@ -1230,13 +1275,13 @@ class TeleopApp:
         # With is_tool_coord=True, "forward" follows the gripper direction;
         # with is_tool_coord=False (base frame), axes are fixed world directions.
         if "w" in keys:
-            vz += linear_vel
-        if "s" in keys:
-            vz -= linear_vel
-        if "space" in keys:
-            vx -= linear_vel
-        if "shift" in keys:
             vx += linear_vel
+        if "s" in keys:
+            vx -= linear_vel
+        if "space" in keys:
+            vz += linear_vel
+        if "shift" in keys:
+            vz -= linear_vel
         if "a" in keys:
             vy += linear_vel
         if "d" in keys:
@@ -1247,11 +1292,9 @@ class TeleopApp:
         if "e" in keys:
             vrz += angular_vel
 
-        # On this setup the controller's effective RX/RZ slots are opposite to the
-        # SDK naming in teleop hand-feel, so mouse-x/QE are intentionally swapped.
-        # mouse left/right -> physical yaw ; mouse up/down -> physical pitch
-        vrx += dx * mouse_gain
-        vry += (dy) * mouse_gain
+        # mouse left/right -> yaw (RZ); mouse up/down -> pitch (RY)
+        vrz -= dx * mouse_gain
+        vry += dy * mouse_gain
         vy = clip(vy, -linear_vel, linear_vel)
         vrx = clip(vrx, -120.0, 120.0)
         vrz = clip(vrz, -120.0, 120.0)
@@ -1382,11 +1425,14 @@ class TeleopApp:
         self.last_state = {
             "ts": now,
             "joints_deg": joints,
+            "joint_velocities_deg_s": qd.tolist(),
             "pose_xyzrpy_deg": list(self.target_pose),
             "gripper_pos": float(self.gripper_pos),
             "torques": torques,
             "torques_filtered": [float(x) if not np.isnan(x) else None for x in self.filtered_curr.tolist()],
             "torque_external": estimate["tau_external"].tolist(),
+            "torque_external_raw": estimate.get("tau_external_raw", np.zeros(6, dtype=np.float64)).tolist(),
+            "torque_external_deadzone": estimate.get("tau_external_deadzone", np.zeros(6, dtype=np.float64)).tolist(),
             "torque_model": estimate["tau_model"].tolist(),
             "torque_static_bias": estimate.get("tau_static_bias", np.zeros(6, dtype=np.float64)).tolist(),
             "torque_motion_comp": estimate.get("tau_motion_comp", np.zeros(6, dtype=np.float64)).tolist(),
@@ -1394,6 +1440,12 @@ class TeleopApp:
             "torque_lambda": float(estimate["lambda"]),
             "torque_time_since_stop": estimate.get("time_since_stop", np.zeros(6, dtype=np.float64)).tolist(),
             "torque_firmware_state": estimate.get("firmware_state", np.zeros(6, dtype=np.float64)).tolist(),
+            "torque_compensation_enabled": bool(estimate.get("compensation_enabled", False)),
+            "torque_compensation_used": bool(estimate.get("compensation_used", False)),
+            "torque_compensation_ready": bool(estimate.get("compensation_ready", False)),
+            "torque_compensation_rejected": bool(estimate.get("compensation_rejected", False)),
+            "torque_compensation_kind": estimate.get("compensation_kind", "none"),
+            "torque_compensation_error": estimate.get("compensation_error"),
             "ee_force": self.ee_force.tolist(),
         }
         self.last_state_ts = now
@@ -1505,12 +1557,19 @@ class TeleopApp:
               f"{self.lerobot_dataset.meta.total_frames} frames)")
 
     def print_currents(self, state):
-        tau = state["torques"]
+        tau = state.get("torque_external", [0.0] * 6)
         f = state.get("ee_force", [0.0] * 6)
         f_mag = (f[0]**2 + f[1]**2 + f[2]**2) ** 0.5
         frame = "TOOL" if self.use_tool_coord else "BASE"
+        if state.get("torque_compensation_enabled", False):
+            if state.get("torque_compensation_rejected", False):
+                comp = "reject"
+            else:
+                comp = "ready" if state.get("torque_compensation_used", False) else "warmup"
+        else:
+            comp = "fallback"
         line = (
-            f"[{frame}] "
+            f"[{frame} ADM-{comp}] "
             f"J1:{tau[0]:6.2f} J2:{tau[1]:6.2f} J3:{tau[2]:6.2f} "
             f"J4:{tau[3]:6.2f} J5:{tau[4]:6.2f} J6:{tau[5]:6.2f}  "
             f"|F|:{f_mag:5.1f}N"
@@ -1636,6 +1695,7 @@ def main(argv=None):
     parser.add_argument("--web-host", default="127.0.0.1", help="Dashboard bind host")
     parser.add_argument("--web-port", type=int, default=8765, help="Dashboard bind port")
     parser.add_argument("--web-fps", type=float, default=10.0, help="Max MJPEG publish FPS per camera")
+    parser.add_argument("--no-start-reset", action="store_true", help="Skip the teleop startup home reset")
     parser.add_argument("--self-check", action="store_true")
     args = parser.parse_args(argv)
 
@@ -1675,6 +1735,7 @@ def main(argv=None):
         args.web_host,
         args.web_port,
         args.web_fps,
+        (not args.no_start_reset),
     )
 
     def _handle(_sig, _frm):
