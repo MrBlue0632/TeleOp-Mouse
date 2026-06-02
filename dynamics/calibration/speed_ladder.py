@@ -22,6 +22,7 @@ from dynamics.calibration.workspace import generate_safe_joint_trajectory
 from dynamics.config import load_config
 
 SPEED_TIERS = (15.0, 25.0, 35.0, 45.0)
+DEFAULT_CONTROL_HZ = 30.0
 DEFAULT_HF_REPOS = (
     "DorayakiLin/xarm6_pick_bread_lerobot",
     "DorayakiLin/xarm6_pick_oreo_lerobot",
@@ -199,7 +200,7 @@ def generate_local_trajectories(
     speeds: Sequence[float] = SPEED_TIERS,
     count: int = 100,
     duration_s: float = 20.0,
-    hz: float = 100.0,
+    hz: float = DEFAULT_CONTROL_HZ,
     amplitude_deg: Sequence[float] = DEFAULT_AMPLITUDE_DEG,
     accel_deg_s2: float = 60.0,
     hold_s: float = 0.0,
@@ -251,6 +252,7 @@ def generate_local_trajectories(
                 source_kind="local",
                 seed=seed,
             )
+            metadata["trajectory_sample_hz"] = float(hz)
             records = _records_from_trajectory(
                 q_traj_rad=q_traj,
                 timestamps=timestamps,
@@ -348,7 +350,7 @@ def validate_joint_trajectory(
     return True, "ok"
 
 
-def retime_joint_trajectory(q_rad: np.ndarray, *, speed_deg_s: float, hz: float = 100.0) -> tuple[np.ndarray, np.ndarray]:
+def retime_joint_trajectory(q_rad: np.ndarray, *, speed_deg_s: float, hz: float = DEFAULT_CONTROL_HZ) -> tuple[np.ndarray, np.ndarray]:
     q = np.asarray(q_rad, dtype=np.float64)
     if q.ndim != 2 or q.shape[0] == 0:
         raise ValueError(f"q_rad must have shape (N, J) with N > 0, got {q.shape}")
@@ -371,13 +373,8 @@ def retime_joint_trajectory(q_rad: np.ndarray, *, speed_deg_s: float, hz: float 
     return np.vstack(rows), np.asarray(timestamps, dtype=np.float64)
 
 
-def hf_direct_timestamps(group: pd.DataFrame, sample_count: int, *, hz: float = 100.0) -> np.ndarray:
-    if "timestamp" in group.columns:
-        timestamps = group["timestamp"].to_numpy(dtype=np.float64)
-        if timestamps.size == int(sample_count) and np.all(np.isfinite(timestamps)):
-            timestamps = timestamps - float(timestamps[0])
-            if np.all(np.diff(timestamps) > 0.0):
-                return timestamps.astype(np.float64)
+def hf_direct_timestamps(group: pd.DataFrame, sample_count: int, *, hz: float = DEFAULT_CONTROL_HZ) -> np.ndarray:
+    _ = group
     sample_hz = float(hz)
     if sample_hz <= 0.0:
         raise ValueError("hz must be > 0")
@@ -447,7 +444,7 @@ def prepare_hf_trajectories(
     *,
     repos: Sequence[str] = DEFAULT_HF_REPOS,
     speeds: Sequence[float] = SPEED_TIERS,
-    hz: float = 100.0,
+    hz: float = DEFAULT_CONTROL_HZ,
     min_frames: int = 20,
     max_step_deg: float = DEFAULT_HF_MAX_STEP_DEG,
     limit_buffer_deg: float = 5.0,
@@ -514,6 +511,7 @@ def prepare_hf_trajectories(
                 seed=-1,
             )
             metadata["hf_column"] = source_column
+            metadata["trajectory_sample_hz"] = float(hz)
             metadata["trajectory_duration_s"] = float(timestamps[-1] - timestamps[0]) if len(timestamps) else 0.0
             records = _records_from_trajectory(
                 q_traj_rad=q_raw,
@@ -562,8 +560,25 @@ def load_trajectory_index(root: str | Path) -> list[TrajectoryEntry]:
     return sorted(by_path.values(), key=lambda item: (item.source_kind, item.speed_deg_s, item.trajectory_id))
 
 
+def _accepted_torque_events(root: str | Path) -> dict[str, dict[str, Any]]:
+    latest_by_trajectory: dict[str, dict[str, Any]] = {}
+    for event in load_manifest(root):
+        trajectory_id = str(event.get("trajectory_id"))
+        if event.get("event") == "torque_collected":
+            if trajectory_id and event.get("torque_path"):
+                latest_by_trajectory[trajectory_id] = event
+        elif event.get("event") == "torque_rejected":
+            torque_path = event.get("torque_path")
+            current = latest_by_trajectory.get(trajectory_id)
+            if current is None:
+                continue
+            if not torque_path or str(current.get("torque_path")) == str(torque_path):
+                latest_by_trajectory.pop(trajectory_id, None)
+    return latest_by_trajectory
+
+
 def _collected_trajectory_ids(root: str | Path) -> set[str]:
-    return {str(event.get("trajectory_id")) for event in load_manifest(root) if event.get("event") == "torque_collected"}
+    return set(_accepted_torque_events(root).keys())
 
 
 def _torque_metadata(root: str | Path, entry: TrajectoryEntry) -> dict[str, Any]:
@@ -658,6 +673,7 @@ def collect_speed_ladder_torque(
         summary = _summarize_torque_file(sanity_out, sanity.path)
         append_manifest(root_path, {"event": "sanity_complete", "torque_path": str(sanity_out), **_torque_metadata(root_path, sanity), **summary})
         if not _confirm_hf_direct(summary, dashboard_url):
+            append_manifest(root_path, {"event": "torque_rejected", "reason": "hf_sanity_not_confirmed", "torque_path": str(sanity_out), **_torque_metadata(root_path, sanity)})
             append_manifest(root_path, {"event": "hf_not_confirmed", "source_kind": source_kind})
             raise SystemExit("HF direct replay was not confirmed; stopping before remaining trajectories")
         append_manifest(root_path, {"event": "hf_confirmed", "source_kind": source_kind})
@@ -689,6 +705,7 @@ def collect_speed_ladder_torque(
         summary = _summarize_torque_file(sanity_out, sanity.path)
         append_manifest(root_path, {"event": "sanity_complete", "torque_path": str(sanity_out), **_torque_metadata(root_path, sanity), **summary})
         if not _confirm_speed(source_kind, float(speed), summary, dashboard_url):
+            append_manifest(root_path, {"event": "torque_rejected", "reason": "speed_sanity_not_confirmed", "torque_path": str(sanity_out), **_torque_metadata(root_path, sanity)})
             append_manifest(root_path, {"event": "speed_not_confirmed", "source_kind": source_kind, "speed_deg_s": float(speed)})
             raise SystemExit(f"speed {speed:.1f} deg/s was not confirmed; stopping before remaining trajectories")
         append_manifest(root_path, {"event": "speed_confirmed", "source_kind": source_kind, "speed_deg_s": float(speed)})
@@ -732,7 +749,17 @@ def collect_one_torque_file(
 
 
 def _torque_files(root: str | Path) -> list[Path]:
-    torque_root = ensure_root(root) / "torque"
+    root_path = ensure_root(root)
+    events = load_manifest(root_path)
+    if any(event.get("event") == "torque_collected" for event in events):
+        manifest_paths: list[Path] = []
+        for event in _accepted_torque_events(root_path).values():
+            path = Path(str(event.get("torque_path")))
+            if path.exists() and "merged" not in path.parts:
+                manifest_paths.append(path)
+        return sorted(dict.fromkeys(manifest_paths))
+
+    torque_root = root_path / "torque"
     if not torque_root.exists():
         return []
     return sorted(path for path in torque_root.rglob("*.parquet") if "merged" not in path.parts)
@@ -940,7 +967,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--no-resume", dest="resume", action="store_false")
     parser.add_argument("--local-count", type=int, default=100)
     parser.add_argument("--local-duration-s", type=float, default=20.0)
-    parser.add_argument("--local-hz", type=float, default=100.0)
+    parser.add_argument("--local-hz", type=float, default=DEFAULT_CONTROL_HZ)
     parser.add_argument("--local-amplitude-deg", type=parse_amplitude, default=list(DEFAULT_AMPLITUDE_DEG))
     parser.add_argument("--local-accel-deg-s2", type=float, default=60.0)
     parser.add_argument("--local-hold-s", type=float, default=0.0)
@@ -948,7 +975,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--local-seed-base", type=int, default=0)
     parser.add_argument("--hf-repo", action="append", dest="hf_repos")
     parser.add_argument("--hf-max-episodes", type=int)
-    parser.add_argument("--hf-hz", type=float, default=100.0)
+    parser.add_argument("--hf-hz", type=float, default=DEFAULT_CONTROL_HZ)
     parser.add_argument("--hf-min-frames", type=int, default=20)
     parser.add_argument("--hf-max-step-deg", type=float, default=DEFAULT_HF_MAX_STEP_DEG)
     parser.add_argument("--hf-replay-speed-deg-s", type=float, default=DEFAULT_HF_REPLAY_SPEED_DEG_S)

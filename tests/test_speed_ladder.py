@@ -44,6 +44,7 @@ class SpeedLadderTests(unittest.TestCase):
         self.assertEqual(len({entry.seed for entry in entries}), 2)
         self.assertEqual(df.loc[0, "source_kind"], "local")
         self.assertEqual(df.loc[0, "speed_deg_s"], 15.0)
+        self.assertEqual(df.loc[0, "trajectory_sample_hz"], 20.0)
         q_cols = [f"q_{idx}" for idx in range(1, 7)]
         q_deg = np.rad2deg(df[q_cols].to_numpy(dtype=np.float64))
         home = np.asarray(CONFIG["home_joints_deg"], dtype=np.float64)
@@ -101,8 +102,14 @@ class SpeedLadderTests(unittest.TestCase):
         self.assertEqual(out.loc[0, "traj_kind"], "hf_lerobot_direct_replay")
         self.assertEqual(len(out), 25)
         self.assertAlmostEqual(out.loc[1, "timestamp"], 1.0 / 30.0, places=7)
+        self.assertEqual(out.loc[0, "trajectory_sample_hz"], 30.0)
         self.assertAlmostEqual(out.loc[0, "q_1"], np.deg2rad(home[0]), places=7)
         self.assertTrue(any(event.get("reason") == "too_few_frames" for event in events))
+
+    def test_speed_ladder_defaults_to_30hz_control_timing(self):
+        self.assertEqual(ladder.DEFAULT_CONTROL_HZ, 30.0)
+        timestamps = ladder.hf_direct_timestamps(pd.DataFrame({"timestamp": [0.0, 1.0, 2.0]}), 3)
+        np.testing.assert_allclose(timestamps, [0.0, 1.0 / 30.0, 2.0 / 30.0])
 
     def test_joint_limit_filter_rejects_buffer_violations(self):
         limits = (np.array([-1.0, -1.0]), np.array([1.0, 1.0]))
@@ -127,6 +134,52 @@ class SpeedLadderTests(unittest.TestCase):
         ok, reason = ladder.validate_joint_trajectory(q, joint_limits=limits, min_frames=20, max_step_deg=10.0)
         self.assertFalse(ok)
         self.assertEqual(reason, "joint_step_too_large")
+
+    def test_merge_excludes_rejected_manifest_torque(self):
+        def write_torque(root: Path, trajectory_id: str, filename: str) -> Path:
+            records = []
+            for row_idx in range(2):
+                row = make_record(
+                    timestamp=float(row_idx),
+                    robot="xarm6",
+                    joint_count=2,
+                    mode="torque",
+                    q=np.zeros(2),
+                    qd=np.zeros(2),
+                    qdd=np.zeros(2),
+                    tau_api=np.ones(2),
+                    tau_model=np.zeros(2),
+                )
+                row.update(
+                    {
+                        "trajectory_id": trajectory_id,
+                        "source_kind": "local",
+                        "source_repo": "",
+                        "speed_deg_s": 15.0,
+                        "speed_tier": "15deg_s",
+                    }
+                )
+                records.append(row)
+            return write_parquet(records, root / "torque" / trajectory_id / filename)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "exp"
+            accepted_path = write_torque(root, "accepted", "torque.parquet")
+            rejected_path = write_torque(root, "rejected", "torque.parquet")
+            retry_old_path = write_torque(root, "retry", "old.parquet")
+            retry_new_path = write_torque(root, "retry", "new.parquet")
+            ladder.append_manifest(root, {"event": "torque_collected", "trajectory_id": "accepted", "torque_path": str(accepted_path)})
+            ladder.append_manifest(root, {"event": "torque_collected", "trajectory_id": "rejected", "torque_path": str(rejected_path)})
+            ladder.append_manifest(root, {"event": "torque_rejected", "trajectory_id": "rejected", "reason": "speed_sanity_not_confirmed"})
+            ladder.append_manifest(root, {"event": "torque_collected", "trajectory_id": "retry", "torque_path": str(retry_old_path)})
+            ladder.append_manifest(root, {"event": "torque_rejected", "trajectory_id": "retry", "reason": "pre_servo_mode_sanity_tracking_not_accepted"})
+            ladder.append_manifest(root, {"event": "torque_collected", "trajectory_id": "retry", "torque_path": str(retry_new_path)})
+
+            self.assertEqual(ladder._collected_trajectory_ids(root), {"accepted", "retry"})
+            paths = ladder.merge_torque_data(root, valid_ratio=0.0, seed=3)
+            merged = read_parquet(paths["merged"])
+
+        self.assertEqual(set(merged["trajectory_id"]), {"accepted", "retry"})
 
     def test_merge_splits_by_trajectory_and_validation_reports_groups(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -129,16 +129,20 @@ def collect_torque_data(
                 diff = LowLatencyDifferentiator(joint_count)
                 if comp is not None and hasattr(comp, "reset"):
                     comp.reset()
-                replay_thread = threading.Thread(
-                    target=backend.replay_joint_positions,
-                    kwargs={
-                        "q_traj_rad": q_traj,
-                        "timestamps": timestamps,
-                        "speed_deg_s": replay_speed,
-                        "acc_deg_s2": replay_acc,
-                    },
-                    daemon=True,
-                )
+                replay_errors: list[BaseException] = []
+
+                def _run_replay() -> None:
+                    try:
+                        backend.replay_joint_positions(
+                            q_traj_rad=q_traj,
+                            timestamps=timestamps,
+                            speed_deg_s=replay_speed,
+                            acc_deg_s2=replay_acc,
+                        )
+                    except BaseException as exc:
+                        replay_errors.append(exc)
+
+                replay_thread = threading.Thread(target=_run_replay)
                 replay_thread.start()
                 start = time.monotonic()
                 ts0 = float(timestamps[0]) if timestamps is not None and len(timestamps) else 0.0
@@ -148,6 +152,8 @@ def collect_torque_data(
                         delay = target - (time.monotonic() - start)
                         if delay > 0:
                             time.sleep(delay)
+                    if replay_errors:
+                        raise RuntimeError("replay thread failed") from replay_errors[0]
                     sample = backend.read_sample()
                     qd, qdd = diff.update(sample.timestamp, sample.q, sample.qd)
                     estimate = estimate_torque_sample(
@@ -182,7 +188,9 @@ def collect_torque_data(
                     )
                     row.update(base_metadata)
                     records.append(row)
-                replay_thread.join(timeout=2.0)
+                replay_thread.join()
+                if replay_errors:
+                    raise RuntimeError("replay thread failed") from replay_errors[0]
     finally:
         backend.close()
 

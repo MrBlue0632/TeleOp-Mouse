@@ -29,7 +29,7 @@ paths:
   torque_dir: dynamics/calibration/torque
   compensation_model: dynamics/calibration/compensation/compensation.pt
 
-sampling_hz: 100
+sampling_hz: 30
 
 trajectory:
   kind: all
@@ -60,7 +60,7 @@ training:
 compensation:
   kinematic_history:
     channels: q_qd
-    control_hz: 100.0
+    control_hz: 30.0
     window_points: 20
   hybrid:
     static_alpha: 1.0

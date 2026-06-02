@@ -15,7 +15,7 @@ CHANNELS_Q_QD = "q_qd"
 CHANNELS_Q_QD_QDD = "q_qd_qdd"
 KINEMATIC_HISTORY_KIND = "kinematic_history"
 DEFAULT_WINDOW_POINTS = 20
-DEFAULT_CONTROL_HZ = 100.0
+DEFAULT_CONTROL_HZ = 30.0
 
 
 class KinematicHistoryCNN(nn.Module):

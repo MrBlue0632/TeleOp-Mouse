@@ -206,23 +206,49 @@ class XArmBackend:
         q_traj = np.asarray(q_traj_rad, dtype=np.float64)
         if q_traj.ndim != 2 or q_traj.shape[1] != self.joint_count:
             raise ValueError(f"q_traj must have shape (N, {self.joint_count})")
+        ts = None
+        if timestamps is not None:
+            ts = np.asarray(timestamps, dtype=np.float64)
+            if ts.ndim != 1 or len(ts) != len(q_traj):
+                raise ValueError("timestamps must be a 1-D array with the same length as q_traj")
+            if not np.all(np.isfinite(ts)):
+                raise ValueError("timestamps must contain only finite values")
+
+        if ts is not None and len(q_traj) > 1:
+            arm.set_mode(1)
+            arm.set_state(0)
+            time.sleep(0.1)
+            t0 = time.monotonic()
+            ts0 = float(ts[0])
+            for idx, q in enumerate(q_traj):
+                if idx > 0:
+                    target = float(ts[idx]) - ts0
+                    delay = target - (time.monotonic() - t0)
+                    if delay > 0:
+                        time.sleep(delay)
+                ret = arm.set_servo_angle_j(
+                    angles=q.tolist(),
+                    speed=float(speed_deg_s),
+                    mvacc=float(acc_deg_s2),
+                    mvtime=0,
+                    is_radian=True,
+                )
+                if isinstance(ret, int) and ret != 0:
+                    raise RuntimeError(f"xArm set_servo_angle_j failed with code {ret}")
+            return
+
         arm.set_mode(0)
         arm.set_state(0)
-        t0 = time.monotonic()
-        ts0 = float(timestamps[0]) if timestamps is not None and len(timestamps) else 0.0
-        for idx, q in enumerate(q_traj):
-            if timestamps is not None and idx > 0:
-                target = float(timestamps[idx]) - ts0
-                delay = target - (time.monotonic() - t0)
-                if delay > 0:
-                    time.sleep(delay)
-            arm.set_servo_angle(
+        for q in q_traj:
+            ret = arm.set_servo_angle(
                 angle=np.rad2deg(q).tolist(),
                 speed=float(speed_deg_s),
                 mvacc=float(acc_deg_s2),
                 is_radian=False,
                 wait=False,
             )
+            if isinstance(ret, int) and ret != 0:
+                raise RuntimeError(f"xArm set_servo_angle failed with code {ret}")
 
     def stop_motion(self) -> None:
         arm = self._require_arm()

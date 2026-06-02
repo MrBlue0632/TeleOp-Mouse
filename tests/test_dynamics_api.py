@@ -21,7 +21,9 @@ class DynamicsApiTests(unittest.TestCase):
         self.assertEqual(config["trajectory"]["workspace_points"], 20)
         self.assertEqual(config["training"]["model_kind"], "kinematic_history")
         self.assertEqual(config["training"]["epochs"], 200)
+        self.assertEqual(config["sampling_hz"], 30)
         self.assertEqual(config["compensation"]["kinematic_history"]["channels"], "q_qd")
+        self.assertEqual(config["compensation"]["kinematic_history"]["control_hz"], 30.0)
         self.assertEqual(config["compensation"]["kinematic_history"]["window_points"], 20)
         self.assertEqual(config["compensation"]["hybrid"]["motion_history_steps"], 3)
 
