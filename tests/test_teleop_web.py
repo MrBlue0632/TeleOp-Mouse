@@ -10,7 +10,7 @@ import numpy as np
 
 from record.web.model import inspect_robot_model
 from record.web.server import ConfigStore, DashboardServer, _mock_state
-from record.web.telemetry import DashboardState, build_app_snapshot, torque_bar
+from record.web.telemetry import DashboardState, build_app_snapshot, torque_bar, transform_wrench_base_to_eef
 
 
 class FakeCamera:
@@ -30,6 +30,34 @@ class TeleopWebTelemetryTests(unittest.TestCase):
         self.assertEqual(torque_bar(2.0)["level"], "medium")
         self.assertEqual(torque_bar(5.0)["level"], "high")
         self.assertAlmostEqual(torque_bar(12.0)["ratio"], 1.0)
+
+    def test_base_to_eef_transform_keeps_identity_pose(self):
+        wrench, ok = transform_wrench_base_to_eef([1, 2, 3, 4, 5, 6], [0, 0, 0, 0, 0, 0])
+
+        self.assertTrue(ok)
+        np.testing.assert_allclose(wrench, [1, 2, 3, 4, 5, 6], atol=1e-9)
+
+    def test_base_to_eef_transform_rotates_yaw_90_deg(self):
+        wrench, ok = transform_wrench_base_to_eef([1, 0, 0, 0, 1, 0], [0, 0, 0, 0, 0, 90])
+
+        self.assertTrue(ok)
+        np.testing.assert_allclose(wrench, [0, -1, 0, 1, 0, 0], atol=1e-9)
+
+    def test_build_app_snapshot_zeroes_eef_force_when_pose_is_invalid(self):
+        app = SimpleNamespace(
+            last_state={
+                "ee_force": [1, 2, 3, 4, 5, 6],
+                "pose_xyzrpy_deg": [0, 0, 0, float("nan"), 0, 0],
+            },
+        )
+
+        snapshot = build_app_snapshot(app)
+
+        self.assertEqual(snapshot["state"]["ee_force_base"], [1, 2, 3, 4, 5, 6])
+        self.assertEqual(snapshot["state"]["ee_force_eef"], [0.0] * 6)
+        self.assertEqual(snapshot["state"]["ee_force_display"], [0.0] * 6)
+        self.assertFalse(snapshot["diagnostics"]["ee_force_transform_ok"])
+        self.assertIn("pose unavailable", snapshot["diagnostics"]["ee_force_transform_note"])
 
     def test_build_app_snapshot_handles_empty_dataset_stale_camera_and_fallback(self):
         stale_ts = time.monotonic() - 4.0
@@ -55,6 +83,11 @@ class TeleopWebTelemetryTests(unittest.TestCase):
                 "torque_firmware_bias": [0, 0, 0, 0, 0, 0],
                 "torque_lambda": 0.25,
                 "ee_force": [1, 2, 2, 0, 0, 0],
+                "ee_force_base": [1, 2, 2, 0, 0, 0],
+                "ee_force_eef": [2, 1, 2, 0, 0, 0],
+                "ee_force_display": [2, 1, 2, 0, 0, 0],
+                "ee_force_display_frame": "EEF",
+                "ee_force_transform_ok": True,
             },
             lerobot_dataset=SimpleNamespace(root="/tmp/data", num_episodes=2, meta=SimpleNamespace(total_frames=42), episode_buffer=None),
             camera=FakeCamera(np.zeros((4, 4, 3), dtype=np.uint8), stale_ts, 1),
@@ -74,11 +107,22 @@ class TeleopWebTelemetryTests(unittest.TestCase):
         self.assertEqual(snapshot["torque"]["external_mode"], "firmware_bias_fallback")
         self.assertEqual(snapshot["torque"]["external_bars"][2]["level"], "high")
         self.assertEqual(snapshot["action"]["velocity_cmd"], [1, 2, 3, 4, 5, 6])
+        self.assertEqual(snapshot["state"]["ee_force"], [1, 2, 2, 0, 0, 0])
+        self.assertEqual(snapshot["state"]["ee_force_base"], [1, 2, 2, 0, 0, 0])
+        self.assertEqual(snapshot["state"]["ee_force_eef"], [2, 1, 2, 0, 0, 0])
+        self.assertEqual(snapshot["state"]["ee_force_display"], [2, 1, 2, 0, 0, 0])
+        self.assertEqual(snapshot["state"]["ee_force_display_frame"], "EEF")
+        self.assertAlmostEqual(snapshot["state"]["ee_force_magnitude"], 3.0)
+        self.assertTrue(snapshot["diagnostics"]["ee_force_transform_ok"])
+        self.assertEqual(snapshot["diagnostics"]["ee_force_display_frame"], "EEF")
 
     def test_mock_state_includes_external_torque_bars(self):
         snapshot = _mock_state().snapshot()
         self.assertEqual(len(snapshot["torque"]["external_bars"]), 6)
         self.assertEqual(snapshot["torque"]["external_bars"][3]["level"], "high")
+        self.assertEqual(snapshot["state"]["ee_force_display"], [1, 2, 2, 0, 0, 0])
+        self.assertEqual(snapshot["state"]["ee_force_display_frame"], "EEF")
+        self.assertTrue(snapshot["diagnostics"]["ee_force_transform_ok"])
 
     def test_dashboard_state_reset_rejects_without_callback_and_during_save(self):
         state = DashboardState()
@@ -195,6 +239,12 @@ class TeleopWebStaticLayoutTests(unittest.TestCase):
         self.assertIn('ArrowHelper', robot_js)
         self.assertIn('forceColor', robot_js)
         self.assertIn('setLength(length', robot_js)
+        self.assertIn('ee_force_display', robot_js)
+        self.assertIn('Frame <strong>${frameLabel}</strong>', robot_js)
+        self.assertIn('eef-force-frame-axes', robot_js)
+        self.assertIn('getWorldQuaternion', robot_js)
+        self.assertIn('applyQuaternion(this.eefQuaternion)', robot_js)
+        self.assertNotIn('state?.ee_force ||', robot_js)
         self.assertIn('createRobotView', app_js)
         self.assertTrue((repo_root / "record" / "web" / "static" / "vendor" / "three.module.min.js").is_file())
         self.assertTrue((repo_root / "record" / "web" / "static" / "vendor" / "three.core.min.js").is_file())

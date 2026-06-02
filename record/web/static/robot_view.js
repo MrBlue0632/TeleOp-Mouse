@@ -95,6 +95,7 @@ export class RobotView {
     this.latestSnapshot = null;
     this.forceVector = new THREE.Vector3();
     this.eefPosition = new THREE.Vector3();
+    this.eefQuaternion = new THREE.Quaternion();
     this.tmpDirection = new THREE.Vector3(1, 0, 0);
 
     this.renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: false, preserveDrawingBuffer: true });
@@ -124,6 +125,11 @@ export class RobotView {
     this.forceArrow.name = "estimated-end-effector-force";
     this.forceArrow.visible = false;
     this.scene.add(this.forceArrow);
+
+    this.eefAxes = new THREE.AxesHelper(0.12);
+    this.eefAxes.name = "eef-force-frame-axes";
+    this.eefAxes.visible = false;
+    this.scene.add(this.eefAxes);
 
     this._addEnvironment();
     this.resize();
@@ -209,7 +215,7 @@ export class RobotView {
 
     this.eefObject = this.linkObjects.get("link_eef") || this.linkObjects.get("link6") || null;
     this.setJointAngles(this.latestSnapshot?.state?.joints_deg || []);
-    this.updateForce(this.latestSnapshot?.state?.ee_force || []);
+    this.updateForce(this.latestSnapshot?.state?.ee_force_display || [], this.latestSnapshot?.state?.ee_force_display_frame || "EEF");
   }
 
   _clearRobot() {
@@ -219,6 +225,8 @@ export class RobotView {
     this.linkObjects.clear();
     this.jointObjects.clear();
     this.eefObject = null;
+    this.forceArrow.visible = false;
+    this.eefAxes.visible = false;
   }
 
   setJointAngles(jointsDeg) {
@@ -237,16 +245,18 @@ export class RobotView {
   update(snapshot) {
     this.latestSnapshot = snapshot;
     this.setJointAngles(snapshot?.state?.joints_deg || []);
-    this.updateForce(snapshot?.state?.ee_force || []);
+    this.updateForce(snapshot?.state?.ee_force_display || [], snapshot?.state?.ee_force_display_frame || "EEF");
   }
 
-  updateForce(forceValues) {
+  updateForce(forceValues, frame = "EEF") {
     const force = vec3(forceValues || [0, 0, 0]);
     const magnitude = force.length();
+    const frameLabel = String(frame || "EEF").toUpperCase() === "BASE" ? "BASE" : "EEF";
     this.forceVector.copy(force);
 
     if (this.forceHud) {
       this.forceHud.innerHTML = `
+        <span>Frame <strong>${frameLabel}</strong></span>
         <span>|F| <strong>${fmt(magnitude, 1)} N</strong></span>
         <span>Fx ${fmt(force.x, 1)}</span>
         <span>Fy ${fmt(force.y, 1)}</span>
@@ -254,13 +264,27 @@ export class RobotView {
       `;
     }
 
-    if (!this.eefObject || magnitude < FORCE_HIDE_N) {
+    if (!this.eefObject) {
       this.forceArrow.visible = false;
+      this.eefAxes.visible = false;
       return;
     }
 
     this.eefObject.getWorldPosition(this.eefPosition);
+    this.eefObject.getWorldQuaternion(this.eefQuaternion);
+    this.eefAxes.visible = true;
+    this.eefAxes.position.copy(this.eefPosition);
+    this.eefAxes.quaternion.copy(this.eefQuaternion);
+
+    if (magnitude < FORCE_HIDE_N) {
+      this.forceArrow.visible = false;
+      return;
+    }
+
     this.tmpDirection.copy(force).normalize();
+    if (frameLabel === "EEF") {
+      this.tmpDirection.applyQuaternion(this.eefQuaternion).normalize();
+    }
     const length = clamp(magnitude * 0.018, 0.035, 0.42);
     const headLength = clamp(length * 0.24, 0.018, 0.08);
     const headWidth = clamp(headLength * 0.55, 0.012, 0.05);

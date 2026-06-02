@@ -39,6 +39,65 @@ def _clean_list(values: Any, size: int | None = None, default: float = 0.0) -> l
     return result
 
 
+def _finite_vector(values: Any, size: int) -> list[float] | None:
+    if values is None:
+        return None
+    try:
+        raw = list(values)
+    except TypeError:
+        return None
+    if len(raw) < size:
+        return None
+    out: list[float] = []
+    for value in raw[:size]:
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            return None
+        if not math.isfinite(number):
+            return None
+        out.append(number)
+    return out
+
+
+def _rpy_deg_to_rotmat(roll_deg: float, pitch_deg: float, yaw_deg: float) -> list[list[float]]:
+    roll = math.radians(float(roll_deg))
+    pitch = math.radians(float(pitch_deg))
+    yaw = math.radians(float(yaw_deg))
+    cr, sr = math.cos(roll), math.sin(roll)
+    cp, sp = math.cos(pitch), math.sin(pitch)
+    cy, sy = math.cos(yaw), math.sin(yaw)
+    return [
+        [cy * cp, cy * sp * sr - sy * cr, cy * sp * cr + sy * sr],
+        [sy * cp, sy * sp * sr + cy * cr, sy * sp * cr - cy * sr],
+        [-sp, cp * sr, cp * cr],
+    ]
+
+
+def _rotmat_transpose_vec(rot: list[list[float]], vec: list[float]) -> list[float]:
+    return [
+        rot[0][0] * vec[0] + rot[1][0] * vec[1] + rot[2][0] * vec[2],
+        rot[0][1] * vec[0] + rot[1][1] * vec[1] + rot[2][1] * vec[2],
+        rot[0][2] * vec[0] + rot[1][2] * vec[1] + rot[2][2] * vec[2],
+    ]
+
+
+def transform_wrench_base_to_eef(wrench_base: Any, pose_xyzrpy_deg: Any) -> tuple[list[float], bool]:
+    """Rotate a BASE-frame wrench into EEF coordinates using pose XYZ/RPY degrees."""
+    wrench = _finite_vector(wrench_base, 6)
+    pose = _finite_vector(pose_xyzrpy_deg, 6)
+    if wrench is None or pose is None:
+        return [0.0] * 6, False
+
+    rot_base_eef = _rpy_deg_to_rotmat(pose[3], pose[4], pose[5])
+    force_eef = _rotmat_transpose_vec(rot_base_eef, wrench[:3])
+    torque_eef = _rotmat_transpose_vec(rot_base_eef, wrench[3:6])
+    wrench_eef = force_eef + torque_eef
+    if not all(math.isfinite(value) for value in wrench_eef):
+        return [0.0] * 6, False
+    return wrench_eef, True
+
+
 def torque_bar(value: Any, *, limit_nm: float = 10.0) -> dict[str, Any]:
     """Return UI-ready absolute torque bar data for an external torque value."""
     magnitude = abs(_clean_float(value))
@@ -127,13 +186,32 @@ def build_app_snapshot(app: Any) -> dict[str, Any]:
     tau_motion = _clean_list(state.get("torque_motion_comp"), 6)
     tau_firmware = _clean_list(state.get("torque_firmware_bias"), 6)
     ee_force = _clean_list(state.get("ee_force"), 6)
-    force_mag = math.sqrt(sum(v * v for v in ee_force[:3]))
+    pose_xyzrpy_deg = _clean_list(state.get("pose_xyzrpy_deg"), 6)
+    ee_force_base = _clean_list(state.get("ee_force_base", ee_force), 6)
+    transformed_force_eef, transform_ok = transform_wrench_base_to_eef(ee_force_base, state.get("pose_xyzrpy_deg"))
+    if state.get("ee_force_eef") is None:
+        ee_force_eef = transformed_force_eef
+    else:
+        ee_force_eef = _clean_list(state.get("ee_force_eef"), 6)
+        transform_ok = bool(state.get("ee_force_transform_ok", True))
+    ee_force_display = _clean_list(state.get("ee_force_display", ee_force_eef), 6)
+    ee_force_display_frame = "EEF"
+    force_mag = math.sqrt(sum(v * v for v in ee_force_display[:3]))
     torque_mode, torque_note = _torque_mode(app)
     saving_evt = getattr(app, "saving_evt", None)
     try:
         saving = bool(saving_evt.is_set()) if saving_evt is not None else False
     except Exception:
         saving = False
+
+    diagnostics = dict(getattr(app, "last_diag", {}) or {})
+    diagnostics["ee_force_transform_ok"] = bool(transform_ok)
+    diagnostics["ee_force_display_frame"] = ee_force_display_frame
+    transform_note = state.get("ee_force_transform_note")
+    if transform_note:
+        diagnostics["ee_force_transform_note"] = str(transform_note)
+    elif not transform_ok:
+        diagnostics["ee_force_transform_note"] = "pose unavailable or non-finite; display force is zeroed"
 
     return {
         "schema_version": 1,
@@ -162,9 +240,13 @@ def build_app_snapshot(app: Any) -> dict[str, Any]:
         "state": {
             "timestamp": _clean_float(state.get("ts"), time.time()),
             "joints_deg": _clean_list(state.get("joints_deg"), 6),
-            "pose_xyzrpy_deg": _clean_list(state.get("pose_xyzrpy_deg"), 6),
+            "pose_xyzrpy_deg": pose_xyzrpy_deg,
             "gripper_pos": _clean_float(state.get("gripper_pos", getattr(app, "gripper_pos", 0.0))),
             "ee_force": ee_force,
+            "ee_force_base": ee_force_base,
+            "ee_force_eef": ee_force_eef,
+            "ee_force_display": ee_force_display,
+            "ee_force_display_frame": ee_force_display_frame,
             "ee_force_magnitude": force_mag,
         },
         "action": {
@@ -183,7 +265,7 @@ def build_app_snapshot(app: Any) -> dict[str, Any]:
             "external_mode": torque_mode,
             "external_note": torque_note,
         },
-        "diagnostics": dict(getattr(app, "last_diag", {}) or {}),
+        "diagnostics": diagnostics,
         "config_status": {
             "restart_required_fields": ["connection", "urdf_path", "payload"],
             "message": "Connection, URDF, and payload edits apply on next dashboard/teleop start.",

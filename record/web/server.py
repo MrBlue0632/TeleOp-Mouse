@@ -289,10 +289,10 @@ def _mock_state() -> DashboardState:
             "robot": {"ip": "mock", "running": True, "coord_frame": "BASE", "state": 1, "error": 0, "saving_episode": False, "reset_enabled": False},
             "dataset": {"root": "data/lerobot_dataset", "repo_id": "teleop/xarm_demo", "task": "mock", "num_episodes": 3, "total_frames": 980, "episode_buffer_size": 42, "episode_index": 3, "rate_hz": 30},
             "camera": {"display": "wrist", "wrist": {"status": "mock"}, "base": {"status": "mock"}, "target": {"status": "mock"}},
-            "state": {"joints_deg": [14, -8, -25, 197, 62, -9], "pose_xyzrpy_deg": [320, 12, 180, 179, 1, -8], "gripper_pos": 620, "ee_force": [1, 2, 2, 0, 0, 0], "ee_force_magnitude": 3},
+            "state": {"joints_deg": [14, -8, -25, 197, 62, -9], "pose_xyzrpy_deg": [320, 12, 180, 179, 1, -8], "gripper_pos": 620, "ee_force": [1, 2, 2, 0, 0, 0], "ee_force_base": [1, 2, 2, 0, 0, 0], "ee_force_eef": [1, 2, 2, 0, 0, 0], "ee_force_display": [1, 2, 2, 0, 0, 0], "ee_force_display_frame": "EEF", "ee_force_magnitude": 3},
             "action": {"velocity_cmd": [0, 0, 0, 0, 0, 0], "gripper": 620},
             "torque": {"api": [0.6, -1.2, 2.8, 5.2, -7.0, 0.3, 0], "model": [0, 0, 0, 0, 0, 0], "external": [0.6, -1.2, 2.8, 5.2, -7.0, 0.3], "external_bars": [torque_bar(v) for v in [0.6, -1.2, 2.8, 5.2, -7.0, 0.3]], "static_bias": [0, 0, 0, 0, 0, 0], "motion_comp": [0, 0, 0, 0, 0, 0], "firmware_bias": [0, 0, 0, 0, 0, 0], "bias_lambda": 0.1, "external_mode": "mock", "external_note": "mock dashboard"},
-            "diagnostics": {"ctrl_hz": 120.0, "main_hz": 30.0, "video_hz": 10.0},
+            "diagnostics": {"ctrl_hz": 120.0, "main_hz": 30.0, "video_hz": 10.0, "ee_force_transform_ok": True, "ee_force_display_frame": "EEF"},
             "config_status": {"restart_required_fields": ["connection", "urdf_path", "payload"], "message": "mock"},
         }
     )
