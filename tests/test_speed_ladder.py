@@ -96,7 +96,11 @@ class SpeedLadderTests(unittest.TestCase):
         self.assertEqual(len(paths), 1)
         self.assertEqual(out.loc[0, "source_kind"], "hf")
         self.assertEqual(out.loc[0, "source_repo"], repo)
+        self.assertEqual(out.loc[0, "speed_tier"], "hf_direct")
         self.assertEqual(out.loc[0, "hf_column"], "action")
+        self.assertEqual(out.loc[0, "traj_kind"], "hf_lerobot_direct_replay")
+        self.assertEqual(len(out), 25)
+        self.assertAlmostEqual(out.loc[1, "timestamp"], 1.0 / 30.0, places=7)
         self.assertAlmostEqual(out.loc[0, "q_1"], np.deg2rad(home[0]), places=7)
         self.assertTrue(any(event.get("reason") == "too_few_frames" for event in events))
 

@@ -31,6 +31,7 @@ DEFAULT_HF_REPOS = (
 )
 DEFAULT_AMPLITUDE_DEG = (8.0, 6.0, 6.0, 10.0, 8.0, 8.0)
 DEFAULT_HF_MAX_STEP_DEG = 15.0
+DEFAULT_HF_REPLAY_SPEED_DEG_S = 30.0
 DEFAULT_OUTPUT_ROOT = Path("dynamics/calibration/speed_ladder_runs")
 DEFAULT_OLD_MODEL = Path("dynamics/calibration/compensation/history_q_qd.pt")
 DEFAULT_COMPENSATION_DIR = Path("dynamics/calibration/compensation")
@@ -137,6 +138,7 @@ def _trajectory_metadata(
     source_repo: str = "",
     episode_index: int = -1,
     seed: int = -1,
+    speed_tier: str | None = None,
 ) -> dict[str, Any]:
     return {
         "experiment_id": Path(root).name,
@@ -145,7 +147,7 @@ def _trajectory_metadata(
         "episode_index": int(episode_index),
         "trajectory_id": str(trajectory_id),
         "speed_deg_s": float(speed_deg_s),
-        "speed_tier": _speed_tier(speed_deg_s),
+        "speed_tier": str(speed_tier) if speed_tier else _speed_tier(speed_deg_s),
         "seed": int(seed),
     }
 
@@ -184,6 +186,10 @@ def local_trajectory_path(root: str | Path, speed_deg_s: float, trajectory_id: s
 
 def hf_trajectory_path(root: str | Path, speed_deg_s: float, repo_id: str, trajectory_id: str) -> Path:
     return ensure_root(root) / "traj" / "hf" / _speed_dir(speed_deg_s) / slug_repo(repo_id) / f"{trajectory_id}.parquet"
+
+
+def hf_direct_trajectory_path(root: str | Path, repo_id: str, trajectory_id: str) -> Path:
+    return ensure_root(root) / "traj" / "hf" / "direct" / slug_repo(repo_id) / f"{trajectory_id}.parquet"
 
 
 def generate_local_trajectories(
@@ -365,6 +371,19 @@ def retime_joint_trajectory(q_rad: np.ndarray, *, speed_deg_s: float, hz: float 
     return np.vstack(rows), np.asarray(timestamps, dtype=np.float64)
 
 
+def hf_direct_timestamps(group: pd.DataFrame, sample_count: int, *, hz: float = 100.0) -> np.ndarray:
+    if "timestamp" in group.columns:
+        timestamps = group["timestamp"].to_numpy(dtype=np.float64)
+        if timestamps.size == int(sample_count) and np.all(np.isfinite(timestamps)):
+            timestamps = timestamps - float(timestamps[0])
+            if np.all(np.diff(timestamps) > 0.0):
+                return timestamps.astype(np.float64)
+    sample_hz = float(hz)
+    if sample_hz <= 0.0:
+        raise ValueError("hz must be > 0")
+    return np.arange(int(sample_count), dtype=np.float64) / sample_hz
+
+
 def _hf_snapshot_dir(root: str | Path, repo_id: str) -> Path:
     return ensure_root(root) / "hf_snapshots" / slug_repo(repo_id)
 
@@ -434,6 +453,7 @@ def prepare_hf_trajectories(
     limit_buffer_deg: float = 5.0,
     start_home_tolerance_deg: float = 60.0,
     max_episodes: int | None = None,
+    hf_replay_speed_deg_s: float = DEFAULT_HF_REPLAY_SPEED_DEG_S,
     resume: bool = True,
 ) -> list[Path]:
     root_path = ensure_root(root)
@@ -477,42 +497,43 @@ def prepare_hf_trajectories(
                 )
                 continue
             valid_seen += 1
-            for speed in speeds:
-                trajectory_id = f"hf_{slug_repo(repo_id)}_ep{episode_index:05d}_s{int(round(float(speed))):02d}"
-                out = hf_trajectory_path(root_path, speed, repo_id, trajectory_id)
-                if resume and out.exists():
-                    prepared.append(out)
-                    continue
-                q_traj, timestamps = retime_joint_trajectory(q_raw, speed_deg_s=float(speed), hz=float(hz))
-                metadata = _trajectory_metadata(
-                    root=root_path,
-                    trajectory_id=trajectory_id,
-                    speed_deg_s=float(speed),
-                    source_kind="hf",
-                    source_repo=repo_id,
-                    episode_index=episode_index,
-                    seed=-1,
-                )
-                metadata["hf_column"] = source_column
-                records = _records_from_trajectory(
-                    q_traj_rad=q_traj,
-                    timestamps=timestamps,
-                    robot=robot,
-                    joint_count=joint_count,
-                    traj_kind="hf_lerobot_replay_speed_ladder",
-                    metadata=metadata,
-                )
-                path = write_parquet(records, out)
-                append_manifest(
-                    root_path,
-                    {
-                        "event": "trajectory_prepared",
-                        "path": str(path),
-                        "rows": len(records),
-                        **metadata,
-                    },
-                )
-                prepared.append(path)
+            trajectory_id = f"hf_{slug_repo(repo_id)}_ep{episode_index:05d}"
+            out = hf_direct_trajectory_path(root_path, repo_id, trajectory_id)
+            if resume and out.exists():
+                prepared.append(out)
+                continue
+            timestamps = hf_direct_timestamps(group, len(q_raw), hz=float(hz))
+            metadata = _trajectory_metadata(
+                root=root_path,
+                trajectory_id=trajectory_id,
+                speed_deg_s=float(hf_replay_speed_deg_s),
+                speed_tier="hf_direct",
+                source_kind="hf",
+                source_repo=repo_id,
+                episode_index=episode_index,
+                seed=-1,
+            )
+            metadata["hf_column"] = source_column
+            metadata["trajectory_duration_s"] = float(timestamps[-1] - timestamps[0]) if len(timestamps) else 0.0
+            records = _records_from_trajectory(
+                q_traj_rad=q_raw,
+                timestamps=timestamps,
+                robot=robot,
+                joint_count=joint_count,
+                traj_kind="hf_lerobot_direct_replay",
+                metadata=metadata,
+            )
+            path = write_parquet(records, out)
+            append_manifest(
+                root_path,
+                {
+                    "event": "trajectory_prepared",
+                    "path": str(path),
+                    "rows": len(records),
+                    **metadata,
+                },
+            )
+            prepared.append(path)
     return prepared
 
 
@@ -595,6 +616,15 @@ def _confirm_speed(source_kind: str, speed: float, summary: dict[str, Any], dash
     return input("> ").strip() == f"CONFIRM {int(round(speed))}"
 
 
+def _confirm_hf_direct(summary: dict[str, Any], dashboard_url: str) -> bool:
+    print("============================================")
+    print("Sanity replay complete: source=hf direct")
+    print(json.dumps(summary, indent=2, sort_keys=True))
+    print(f"Dashboard/log reference: {dashboard_url}")
+    print("Type exactly CONFIRM HF to collect the remaining HF trajectories.")
+    return input("> ").strip() == "CONFIRM HF"
+
+
 def collect_speed_ladder_torque(
     config: dict,
     root: str | Path,
@@ -612,6 +642,36 @@ def collect_speed_ladder_torque(
     entries = [entry for entry in load_trajectory_index(root_path) if entry.source_kind == source_kind]
     collected = _collected_trajectory_ids(root_path) if resume else set()
     outputs: list[Path] = []
+    if source_kind == "hf":
+        hf_entries = [entry for entry in entries if entry.trajectory_id not in collected]
+        if not hf_entries:
+            return outputs
+        sanity = hf_entries[0]
+        sanity_out = collect_one_torque_file(
+            config,
+            root_path,
+            sanity,
+            replay_acc_deg_s2=replay_acc_deg_s2,
+            model_path=model_path,
+        )
+        outputs.append(sanity_out)
+        summary = _summarize_torque_file(sanity_out, sanity.path)
+        append_manifest(root_path, {"event": "sanity_complete", "torque_path": str(sanity_out), **_torque_metadata(root_path, sanity), **summary})
+        if not _confirm_hf_direct(summary, dashboard_url):
+            append_manifest(root_path, {"event": "hf_not_confirmed", "source_kind": source_kind})
+            raise SystemExit("HF direct replay was not confirmed; stopping before remaining trajectories")
+        append_manifest(root_path, {"event": "hf_confirmed", "source_kind": source_kind})
+        for entry in hf_entries[1:]:
+            out = collect_one_torque_file(
+                config,
+                root_path,
+                entry,
+                replay_acc_deg_s2=replay_acc_deg_s2,
+                model_path=model_path,
+            )
+            outputs.append(out)
+        return outputs
+
     for speed in speeds:
         speed_entries = [entry for entry in entries if math.isclose(entry.speed_deg_s, float(speed), rel_tol=0.0, abs_tol=1e-9)]
         speed_entries = [entry for entry in speed_entries if entry.trajectory_id not in collected]
@@ -652,7 +712,8 @@ def collect_one_torque_file(
     replay_acc_deg_s2: float = 200.0,
     model_path: str | Path | None = None,
 ) -> Path:
-    output_dir = ensure_root(root) / "torque" / entry.source_kind / _speed_dir(entry.speed_deg_s) / entry.trajectory_id
+    speed_bucket = "direct" if entry.source_kind == "hf" and entry.speed_tier == "hf_direct" else _speed_dir(entry.speed_deg_s)
+    output_dir = ensure_root(root) / "torque" / entry.source_kind / speed_bucket / entry.trajectory_id
     try:
         path = collect_torque_data(
             config,
@@ -890,6 +951,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--hf-hz", type=float, default=100.0)
     parser.add_argument("--hf-min-frames", type=int, default=20)
     parser.add_argument("--hf-max-step-deg", type=float, default=DEFAULT_HF_MAX_STEP_DEG)
+    parser.add_argument("--hf-replay-speed-deg-s", type=float, default=DEFAULT_HF_REPLAY_SPEED_DEG_S)
     parser.add_argument("--hf-limit-buffer-deg", type=float, default=5.0)
     parser.add_argument("--hf-start-home-tolerance-deg", type=float, default=60.0)
     parser.add_argument("--replay-acc-deg-s2", type=float, default=200.0)
@@ -948,6 +1010,7 @@ def run_stage(args: argparse.Namespace) -> Any:
             hz=args.hf_hz,
             min_frames=args.hf_min_frames,
             max_step_deg=args.hf_max_step_deg,
+            hf_replay_speed_deg_s=args.hf_replay_speed_deg_s,
             limit_buffer_deg=args.hf_limit_buffer_deg,
             start_home_tolerance_deg=args.hf_start_home_tolerance_deg,
             max_episodes=args.hf_max_episodes,
