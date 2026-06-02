@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Sequence
+from typing import Any, Sequence
 import threading
 import time
 
@@ -57,6 +57,27 @@ def resolve_traj_path(path: str | Path | None, traj_dir: str | Path = "dynamics/
     return resolve_traj_paths(path, traj_dir)[0]
 
 
+def _sanitize_scalar_metadata(metadata: dict[str, Any] | None) -> dict[str, Any]:
+    if not metadata:
+        return {}
+    out: dict[str, Any] = {}
+    for key, value in metadata.items():
+        if not isinstance(key, str) or not key:
+            continue
+        if isinstance(value, np.generic):
+            value = value.item()
+        if isinstance(value, bool):
+            out[key] = bool(value)
+        elif isinstance(value, int):
+            out[key] = int(value)
+        elif isinstance(value, float):
+            if np.isfinite(value):
+                out[key] = float(value)
+        elif isinstance(value, str):
+            out[key] = value
+    return out
+
+
 def collect_torque_data(
     config: dict,
     *,
@@ -64,6 +85,9 @@ def collect_torque_data(
     traj_dir: str | Path = "dynamics/calibration/traj",
     output_dir: str | Path = "dynamics/calibration/torque",
     model_path: str | Path | None = None,
+    replay_speed_deg_s: float | None = None,
+    replay_acc_deg_s2: float | None = None,
+    metadata: dict[str, Any] | None = None,
 ) -> Path:
     robot_name = str(config.get("robot_name", "robot"))
     joint_count = int(config.get("joint_count", 6))
@@ -71,6 +95,19 @@ def collect_torque_data(
     torque_cfg = config.get("torque", {})
     if not isinstance(torque_cfg, dict):
         torque_cfg = {}
+    replay_speed = float(
+        replay_speed_deg_s
+        if replay_speed_deg_s is not None
+        else torque_cfg.get("replay_speed_deg_s", config.get("replay_speed_deg_s", 30))
+    )
+    replay_acc = float(
+        replay_acc_deg_s2
+        if replay_acc_deg_s2 is not None
+        else torque_cfg.get("replay_acc_deg_s2", config.get("replay_acc_deg_s2", 200))
+    )
+    base_metadata = _sanitize_scalar_metadata(metadata)
+    base_metadata.setdefault("replay_speed_deg_s", replay_speed)
+    base_metadata.setdefault("replay_acc_deg_s2", replay_acc)
 
     robot = resolve_robot(config["urdf_path"], name=robot_name, payload=config.get("payload"))
     if model_path:
@@ -97,8 +134,8 @@ def collect_torque_data(
                     kwargs={
                         "q_traj_rad": q_traj,
                         "timestamps": timestamps,
-                        "speed_deg_s": float(torque_cfg.get("replay_speed_deg_s", config.get("replay_speed_deg_s", 30))),
-                        "acc_deg_s2": float(torque_cfg.get("replay_acc_deg_s2", config.get("replay_acc_deg_s2", 200))),
+                        "speed_deg_s": replay_speed,
+                        "acc_deg_s2": replay_acc,
                     },
                     daemon=True,
                 )
@@ -121,30 +158,30 @@ def collect_torque_data(
                         model=model,
                         compensator=comp,
                     )
-                    records.append(
-                        make_record(
-                            timestamp=sample.timestamp,
-                            robot=robot_name,
-                            joint_count=joint_count,
-                            mode="torque",
-                            q=sample.q,
-                            qd=qd,
-                            qdd=qdd,
-                            tau_api=estimate.tau_api,
-                            tau_theory=estimate.tau_theory,
-                            tau_comp=estimate.tau_comp,
-                            tau_error=estimate.tau_error,
-                            tau_static_bias=estimate.tau_static_bias,
-                            tau_motion_comp=estimate.tau_motion_comp,
-                            tau_firmware_bias=estimate.tau_firmware_bias,
-                            tau_external=estimate.tau_external,
-                            time_since_stop=estimate.time_since_stop,
-                            firmware_state=estimate.firmware_state,
-                            motion_lambda=estimate.motion_lambda,
-                            is_moving=estimate.is_moving,
-                            source_file=str(traj_file),
-                        )
+                    row = make_record(
+                        timestamp=sample.timestamp,
+                        robot=robot_name,
+                        joint_count=joint_count,
+                        mode="torque",
+                        q=sample.q,
+                        qd=qd,
+                        qdd=qdd,
+                        tau_api=estimate.tau_api,
+                        tau_theory=estimate.tau_theory,
+                        tau_comp=estimate.tau_comp,
+                        tau_error=estimate.tau_error,
+                        tau_static_bias=estimate.tau_static_bias,
+                        tau_motion_comp=estimate.tau_motion_comp,
+                        tau_firmware_bias=estimate.tau_firmware_bias,
+                        tau_external=estimate.tau_external,
+                        time_since_stop=estimate.time_since_stop,
+                        firmware_state=estimate.firmware_state,
+                        motion_lambda=estimate.motion_lambda,
+                        is_moving=estimate.is_moving,
+                        source_file=str(traj_file),
                     )
+                    row.update(base_metadata)
+                    records.append(row)
                 replay_thread.join(timeout=2.0)
     finally:
         backend.close()

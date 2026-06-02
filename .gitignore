@@ -9,3 +9,4 @@ dynamics/calibration/traj/*.parquet
 dynamics/calibration/torque/*.parquet
 dynamics/calibration/compensation/*.pt
 dynamics/calibration/invalid/
+dynamics/calibration/speed_ladder_runs/
