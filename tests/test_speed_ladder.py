@@ -88,7 +88,6 @@ class SpeedLadderTests(unittest.TestCase):
                 speeds=[15.0],
                 hz=30.0,
                 min_frames=20,
-                max_step_deg=10.0,
                 resume=False,
             )
             out = read_parquet(paths[0])
@@ -111,6 +110,19 @@ class SpeedLadderTests(unittest.TestCase):
         ok, reason = ladder.validate_joint_trajectory(q, joint_limits=(np.array([-0.5, -0.5]), np.array([0.5, 0.5])), min_frames=20)
         self.assertFalse(ok)
         self.assertEqual(reason, "joint_limit_buffer_violation")
+
+    def test_default_hf_step_filter_allows_15_degree_steps(self):
+        limits = (np.full(6, -np.pi), np.full(6, np.pi))
+        q = np.zeros((20, 6), dtype=np.float64)
+        q[1:, 0] = np.deg2rad(12.0)
+
+        ok, reason = ladder.validate_joint_trajectory(q, joint_limits=limits, min_frames=20)
+
+        self.assertEqual(ladder.DEFAULT_HF_MAX_STEP_DEG, 15.0)
+        self.assertTrue(ok, reason)
+        ok, reason = ladder.validate_joint_trajectory(q, joint_limits=limits, min_frames=20, max_step_deg=10.0)
+        self.assertFalse(ok)
+        self.assertEqual(reason, "joint_step_too_large")
 
     def test_merge_splits_by_trajectory_and_validation_reports_groups(self):
         with tempfile.TemporaryDirectory() as tmp:

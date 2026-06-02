@@ -30,6 +30,7 @@ DEFAULT_HF_REPOS = (
     "DorayakiLin/xarm6_pick_fanta_lerobot",
 )
 DEFAULT_AMPLITUDE_DEG = (8.0, 6.0, 6.0, 10.0, 8.0, 8.0)
+DEFAULT_HF_MAX_STEP_DEG = 15.0
 DEFAULT_OUTPUT_ROOT = Path("dynamics/calibration/speed_ladder_runs")
 DEFAULT_OLD_MODEL = Path("dynamics/calibration/compensation/history_q_qd.pt")
 DEFAULT_COMPENSATION_DIR = Path("dynamics/calibration/compensation")
@@ -319,7 +320,7 @@ def validate_joint_trajectory(
     joint_limits: tuple[np.ndarray, np.ndarray],
     home_q_rad: np.ndarray | None = None,
     min_frames: int = 20,
-    max_step_deg: float = 10.0,
+    max_step_deg: float = DEFAULT_HF_MAX_STEP_DEG,
     start_home_tolerance_deg: float | None = 60.0,
 ) -> tuple[bool, str]:
     q = np.asarray(q_rad, dtype=np.float64)
@@ -429,7 +430,7 @@ def prepare_hf_trajectories(
     speeds: Sequence[float] = SPEED_TIERS,
     hz: float = 100.0,
     min_frames: int = 20,
-    max_step_deg: float = 10.0,
+    max_step_deg: float = DEFAULT_HF_MAX_STEP_DEG,
     limit_buffer_deg: float = 5.0,
     start_home_tolerance_deg: float = 60.0,
     max_episodes: int | None = None,
@@ -888,7 +889,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--hf-max-episodes", type=int)
     parser.add_argument("--hf-hz", type=float, default=100.0)
     parser.add_argument("--hf-min-frames", type=int, default=20)
-    parser.add_argument("--hf-max-step-deg", type=float, default=10.0)
+    parser.add_argument("--hf-max-step-deg", type=float, default=DEFAULT_HF_MAX_STEP_DEG)
     parser.add_argument("--hf-limit-buffer-deg", type=float, default=5.0)
     parser.add_argument("--hf-start-home-tolerance-deg", type=float, default=60.0)
     parser.add_argument("--replay-acc-deg-s2", type=float, default=200.0)
