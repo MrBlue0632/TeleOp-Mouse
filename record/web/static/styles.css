@@ -127,9 +127,39 @@ h3 { font-size: 13px; color: var(--gold); margin-bottom: 10px; text-transform: u
   font-size: 12px;
 }
 .data-row { margin-top: 10px; color: var(--muted); font-size: 12px; }
-.robot-canvas-wrap { border: 1px solid var(--line); border-radius: 8px; background: #060504; height: 420px; }
-.compact-robot .robot-canvas-wrap { height: 220px; }
+.robot-canvas-wrap {
+  position: relative;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #060504;
+  height: 420px;
+  overflow: hidden;
+}
+.compact-robot .robot-canvas-wrap { height: clamp(320px, 35vh, 460px); }
 #robotCanvas { width: 100%; height: 100%; display: block; }
+.force-hud {
+  position: absolute;
+  left: 10px;
+  right: 10px;
+  bottom: 10px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+  pointer-events: none;
+}
+.force-hud span {
+  min-height: 28px;
+  display: inline-flex;
+  align-items: center;
+  border: 1px solid rgba(215, 167, 53, 0.38);
+  border-radius: 8px;
+  padding: 0 9px;
+  background: rgba(5, 4, 3, 0.78);
+  color: var(--muted);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+.force-hud strong { color: var(--green); margin-left: 4px; }
 .urdf-line { display: flex; justify-content: space-between; gap: 10px; color: var(--muted); font-size: 12px; margin-top: 9px; }
 .compact-robot .urdf-line { flex-direction: column; }
 
@@ -187,7 +217,9 @@ h3 { font-size: 13px; color: var(--gold); margin-bottom: 10px; text-transform: u
   .topbar { align-items: flex-start; flex-direction: column; padding: 18px; }
   .dashboard-shell { grid-template-columns: 1fr; grid-template-areas: "vision" "robot" "dataset" "torque" "config" "hotkeys"; padding: 10px; }
   .primary-vision .camera-frame { min-height: 250px; aspect-ratio: 16 / 10; }
-  .robot-canvas-wrap { height: 260px; }
-  .compact-robot .robot-canvas-wrap { height: 220px; }
+  .robot-canvas-wrap { height: 280px; }
+  .compact-robot .robot-canvas-wrap { height: 300px; }
+  .force-hud { gap: 6px; }
+  .force-hud span { min-height: 26px; padding: 0 7px; font-size: 11px; }
   .torque-row { grid-template-columns: 30px 64px 1fr 60px; gap: 7px; }
 }

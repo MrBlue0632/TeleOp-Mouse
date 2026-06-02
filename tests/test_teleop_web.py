@@ -134,6 +134,11 @@ class TeleopWebRobotModelTests(unittest.TestCase):
         self.assertEqual(info["mesh_count"], 0)
         self.assertEqual(info["render_mode"], "primitive")
         self.assertIn("cylinder", info["geometry_types"])
+        self.assertEqual(info["movable_joints"], ["joint1", "joint2", "joint3", "joint4", "joint5", "joint6"])
+        self.assertEqual(info["root_links"], ["world"])
+        self.assertIn("link_eef", info["links"])
+        self.assertEqual(info["joints"][1]["axis"], [0.0, 0.0, 1.0])
+        self.assertEqual(info["links"]["link2"]["visuals"][0]["geometry"]["type"], "box")
 
     def test_server_serves_robot_model_contract(self):
         repo_root = Path(__file__).resolve().parents[1]
@@ -148,6 +153,7 @@ class TeleopWebRobotModelTests(unittest.TestCase):
 
         self.assertIn('"ok":true', body)
         self.assertIn('"render_mode":"primitive"', body)
+        self.assertIn('"movable_joints":["joint1","joint2","joint3","joint4","joint5","joint6"]', body)
 
 
 class TeleopWebStaticLayoutTests(unittest.TestCase):
@@ -158,11 +164,15 @@ class TeleopWebStaticLayoutTests(unittest.TestCase):
 
         self.assertIn('class="panel vision-panel primary-vision"', html)
         self.assertIn('class="panel robot-panel compact-robot"', html)
+        self.assertIn('id="forceHud"', html)
+        self.assertIn('type="importmap"', html)
+        self.assertIn('type="module" src="/static/app.js"', html)
         self.assertIn('"vision vision robot"', css)
         self.assertIn('"vision vision dataset"', css)
         self.assertIn('"torque config hotkeys"', css)
         self.assertIn(".primary-vision .camera-frame", css)
         self.assertIn(".compact-robot .robot-canvas-wrap", css)
+        self.assertIn(".force-hud", css)
 
     def test_static_theme_uses_solid_black_gold_without_gradients(self):
         repo_root = Path(__file__).resolve().parents[1]
@@ -172,6 +182,23 @@ class TeleopWebStaticLayoutTests(unittest.TestCase):
         self.assertIn("--bg: #050403;", css)
         self.assertIn("--panel: #11100d;", css)
         self.assertIn("--gold: #d7a735;", css)
+
+    def test_static_robot_view_uses_local_three_and_force_arrow(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        html = (repo_root / "record" / "web" / "static" / "index.html").read_text(encoding="utf-8")
+        app_js = (repo_root / "record" / "web" / "static" / "app.js").read_text(encoding="utf-8")
+        robot_js = (repo_root / "record" / "web" / "static" / "robot_view.js").read_text(encoding="utf-8")
+
+        self.assertIn('/static/vendor/three.module.min.js', html)
+        self.assertIn('from "three"', robot_js)
+        self.assertIn('OrbitControls', robot_js)
+        self.assertIn('ArrowHelper', robot_js)
+        self.assertIn('forceColor', robot_js)
+        self.assertIn('setLength(length', robot_js)
+        self.assertIn('createRobotView', app_js)
+        self.assertTrue((repo_root / "record" / "web" / "static" / "vendor" / "three.module.min.js").is_file())
+        self.assertTrue((repo_root / "record" / "web" / "static" / "vendor" / "three.core.min.js").is_file())
+        self.assertTrue((repo_root / "record" / "web" / "static" / "vendor" / "controls" / "OrbitControls.js").is_file())
 
 
 if __name__ == "__main__":

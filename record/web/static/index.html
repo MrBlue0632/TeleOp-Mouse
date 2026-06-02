@@ -5,6 +5,14 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>TeleOp Web Dashboard</title>
   <link rel="stylesheet" href="/static/styles.css">
+  <script type="importmap">
+    {
+      "imports": {
+        "three": "/static/vendor/three.module.min.js",
+        "three/addons/": "/static/vendor/"
+      }
+    }
+  </script>
 </head>
 <body>
   <header class="topbar">
@@ -43,13 +51,19 @@
     <section class="panel robot-panel compact-robot">
       <div class="panel-head">
         <div>
-          <p class="eyebrow">URDF / Mesh Pose</p>
+          <p class="eyebrow">URDF / End-Effector Force</p>
           <h2>机械臂仿真</h2>
         </div>
         <span id="coordFrame" class="status-pill">BASE</span>
       </div>
       <div class="robot-canvas-wrap">
-        <canvas id="robotCanvas" width="720" height="520"></canvas>
+        <canvas id="robotCanvas" width="720" height="520" aria-label="xArm6 live 3D simulation"></canvas>
+        <div id="forceHud" class="force-hud">
+          <span>|F| <strong>-- N</strong></span>
+          <span>Fx --</span>
+          <span>Fy --</span>
+          <span>Fz --</span>
+        </div>
       </div>
       <div class="urdf-line">
         <span id="urdfStatus">URDF loading...</span>
@@ -126,6 +140,6 @@
     </section>
   </main>
 
-  <script src="/static/app.js"></script>
+  <script type="module" src="/static/app.js"></script>
 </body>
 </html>
