@@ -18,6 +18,11 @@ SETTLE_LAM_THR = 0.05
 DETECT_EMA_ALPHA = 0.05
 ADMITTANCE_FILTER_ALPHA = 0.3
 COMPENSATION_MAX_ABS_NM = 25.0
+STOP_SETTLE_S = 1.0
+STOP_SPIKE_NORM_NM = 10.0
+OBSERVER_BLEND_MOTION = 0.65
+OBSERVER_BLEND_STATIC = 0.15
+OBSERVER_BLEND_SETTLING = 0.75
 
 BIAS_LEVELS = {
     1: (0.0000, 0.0000),
@@ -85,12 +90,24 @@ class FirmwareBiasTorqueEstimator:
         self.filter_alpha = float(filter_alpha)
         self.last_compensation_reject = None
         self.tau_external_filt = np.zeros(N_JOINTS, dtype=np.float64)
+        self.stop_settle_s = float(os.getenv("TELEOP_TORQUE_STOP_SETTLE_S", STOP_SETTLE_S))
+        self.stop_spike_norm_nm = float(os.getenv("TELEOP_TORQUE_STOP_SPIKE_NORM_NM", STOP_SPIKE_NORM_NM))
+        self.observer = None
+        self.observer_error = None
+        self._last_update_t: float | None = None
+        self._last_motion_t: float | None = None
+        self._last_stop_t: float | None = None
+        self._was_moving = False
+        self._stop_event_id = 0
+        self.stop_phase = "static"
         self.lam = 0.0
         self.detected_bias = np.zeros(N_JOINTS, dtype=np.float64)
         self.resid_ema = np.zeros(N_JOINTS, dtype=np.float64)
         self.ema_initialized = False
         self._last_qd_rad: np.ndarray | None = None
         self._last_t: float | None = None
+
+        self._configure_observer()
 
         model_path = compensation_path or os.getenv("TELEOP_TORQUE_COMP_MODEL")
         if model_path:
@@ -115,6 +132,19 @@ class FirmwareBiasTorqueEstimator:
                     self.hybrid = None
                     self.compensation_kind = "error"
 
+    def _configure_observer(self):
+        enabled = os.getenv("TELEOP_TORQUE_USE_OBSERVER", "1").strip().lower() not in {"0", "false", "no", "off"}
+        if not enabled or not hasattr(self.dynamics, "_mass_matrix_rad"):
+            return
+        try:
+            from .dynamics import MomentumObserver
+
+            gain = float(os.getenv("TELEOP_TORQUE_OBSERVER_GAIN", "50.0"))
+            self.observer = MomentumObserver(self.dynamics, gain=gain)
+        except Exception as exc:
+            self.observer_error = str(exc)
+            self.observer = None
+
     def _configure_compensation_sample_hz(self):
         if self.compensator is None or self.compensation_sample_hz is None:
             return
@@ -128,9 +158,28 @@ class FirmwareBiasTorqueEstimator:
         except Exception as exc:
             self.hybrid_error = f"failed to set compensation sample hz: {exc}"
 
-    def _update_firmware_bias(self, qd, tau, tau_model):
+    def _update_motion_phase(self, now, is_moving_raw):
+        if is_moving_raw:
+            self._was_moving = True
+            self._last_motion_t = now
+            self.stop_phase = "motion"
+            return 0.0
+        if self._was_moving:
+            self._was_moving = False
+            self._last_stop_t = now
+            self._stop_event_id += 1
+        if self._last_stop_t is None:
+            self.stop_phase = "static"
+            return 0.0
+        time_since_stop = max(0.0, float(now - self._last_stop_t))
+        self.stop_phase = "settling" if time_since_stop <= self.stop_settle_s else "static"
+        return time_since_stop
+
+    def _update_firmware_bias(self, qd, tau, tau_model, now):
         max_speed = float(np.abs(qd).max()) if qd.size else 0.0
-        is_moving = float(max_speed > MOTION_SPEED_THR)
+        is_moving_raw = bool(max_speed > MOTION_SPEED_THR)
+        time_since_stop = self._update_motion_phase(now, is_moving_raw)
+        is_moving = float(is_moving_raw)
         self.lam = (1.0 - BLEND_ALPHA) * self.lam + BLEND_ALPHA * is_moving
 
         resid = tau - tau_model
@@ -150,7 +199,7 @@ class FirmwareBiasTorqueEstimator:
         else:
             self.ema_initialized = False
 
-        return self.detected_bias * (1.0 - self.lam)
+        return self.detected_bias * (1.0 - self.lam), time_since_stop
 
     def _kinematics_rad(self, q, qd):
         now = time.time()
@@ -173,6 +222,31 @@ class FirmwareBiasTorqueEstimator:
         if max_abs > self.compensation_max_abs_nm:
             return False, f"compensation output too large: {max_abs:.3f} Nm > {self.compensation_max_abs_nm:.3f} Nm"
         return True, None
+
+    def _observer_direct_residual(self, q, qd, tau, now):
+        zeros = np.zeros(N_JOINTS, dtype=np.float64)
+        if self.observer is None:
+            return zeros, False
+        if self._last_update_t is None:
+            dt = 1.0 / float(self.compensation_sample_hz or 100.0)
+        else:
+            dt = max(float(now - self._last_update_t), 1e-4)
+        try:
+            direct = _as_joint_vector(self.observer.update(q, qd, tau, dt))
+            if not np.all(np.isfinite(direct)):
+                return zeros, False
+            return direct, True
+        except Exception as exc:
+            self.observer_error = str(exc)
+            self.observer = None
+            return zeros, False
+
+    def _observer_blend(self):
+        if self.stop_phase == "motion":
+            return OBSERVER_BLEND_MOTION
+        if self.stop_phase == "settling":
+            return OBSERVER_BLEND_SETTLING
+        return OBSERVER_BLEND_STATIC
 
     def _compensation_estimate(self, q, qd, tau, tau_model, tau_jump):
         zeros = np.zeros(N_JOINTS, dtype=np.float64)
@@ -236,9 +310,11 @@ class FirmwareBiasTorqueEstimator:
         q = _as_joint_vector(q_deg)
         qd = _as_joint_vector(qd_dps)
         tau = _as_joint_vector(tau_api)
+        now = time.time()
 
         tau_model = self.dynamics.gravity(q) + self.dynamics.coriolis(q, qd)
-        tau_jump = self._update_firmware_bias(qd, tau, tau_model)
+        tau_jump, stop_time_scalar = self._update_firmware_bias(qd, tau, tau_model, now)
+        observer_direct, observer_ok = self._observer_direct_residual(q, qd, tau, now)
         (
             direct_residual,
             tau_comp,
@@ -253,12 +329,37 @@ class FirmwareBiasTorqueEstimator:
             lam,
         ) = self._compensation_estimate(q, qd, tau, tau_model, tau_jump)
 
+        fallback_time_since_stop = np.full(N_JOINTS, stop_time_scalar, dtype=np.float64)
+        if time_since_stop is None or not np.any(time_since_stop):
+            time_since_stop = fallback_time_since_stop
+
         # Xarm_force admittance convention: tau_ext = tau_model + compensation - tau_meas.
-        tau_external_raw = -_as_joint_vector(direct_residual)
+        tau_external_direct = -_as_joint_vector(direct_residual)
+        tau_external_observer = -observer_direct if observer_ok else np.zeros(N_JOINTS, dtype=np.float64)
+        if observer_ok:
+            blend = self._observer_blend()
+            tau_external_raw = (1.0 - blend) * tau_external_direct + blend * tau_external_observer
+        else:
+            tau_external_raw = tau_external_direct.copy()
+
+        direct_norm = float(np.linalg.norm(tau_external_direct))
+        confidence = 1.0
+        valid_no_contact = True
+        if self.stop_phase == "settling":
+            confidence = 0.45
+            if direct_norm > self.stop_spike_norm_nm:
+                confidence = 0.15
+                valid_no_contact = False
+                tau_external_raw = tau_external_raw * confidence
+        if comp_rejected:
+            confidence = min(confidence, 0.5)
+            valid_no_contact = False
+
         tau_external_deadzone = _apply_admittance_dead_zone(tau_external_raw)
         alpha = min(1.0, max(0.0, self.filter_alpha))
         self.tau_external_filt = alpha * tau_external_deadzone + (1.0 - alpha) * self.tau_external_filt
         self.compensation_ready = bool(comp_ready)
+        self._last_update_t = now
 
         return {
             "lambda": float(lam),
@@ -268,11 +369,19 @@ class FirmwareBiasTorqueEstimator:
             "tau_static_bias": tau_static,
             "tau_motion_comp": tau_motion,
             "tau_firmware_bias": tau_firmware,
+            "tau_external_direct": tau_external_direct,
+            "tau_external_observer": tau_external_observer,
             "tau_external_raw": tau_external_raw,
             "tau_external_deadzone": tau_external_deadzone,
             "tau_external": self.tau_external_filt.copy(),
             "time_since_stop": time_since_stop,
             "firmware_state": firmware_state,
+            "stop_phase": self.stop_phase,
+            "stop_event_id": int(self._stop_event_id),
+            "estimator_confidence": float(confidence),
+            "valid_no_contact": bool(valid_no_contact),
+            "observer_enabled": observer_ok,
+            "observer_error": self.observer_error,
             "compensation_enabled": self.compensator is not None,
             "compensation_used": bool(comp_used),
             "compensation_ready": bool(comp_ready),

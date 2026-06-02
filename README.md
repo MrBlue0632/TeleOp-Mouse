@@ -80,7 +80,12 @@ data/lerobot_dataset/
 | `observation.pose_xyzrpy_deg` | (6,) | End-effector pose |
 | `observation.torques` | (7,) | Raw API joint torques |
 | `observation.torques_filtered` | (7,) | Filtered joint torques |
-| `observation.torque_external` | (6,) | Admittance-control external joint torques after dead-zone + EMA filter |
+| `observation.torque_external` | (6,) | Fused admittance-control external joint torques after dead-zone + EMA filter |
+| `observation.torque_external_direct` | (6,) | Direct residual external-torque channel before fusion |
+| `observation.torque_external_observer` | (6,) | Momentum-observer external-torque channel |
+| `observation.torque_estimator_confidence` | (1,) | Runtime confidence for the fused external-torque estimate |
+| `observation.torque_valid_no_contact` | (1,) | Whether the sample is valid for no-contact residual training |
+| `observation.torque_stop_event_id` | (1,) | Stop-transition event counter |
 | `observation.torque_model` | (6,) | Gravity + Coriolis model torque |
 | `observation.torque_static_bias` | (6,) | Position-dependent static residual compensation |
 | `observation.torque_motion_comp` | (6,) | Motion residual compensation |
@@ -146,4 +151,18 @@ Use a validated checkpoint during teleop only when its calibration workspace mat
 
 ```bash
 TELEOP_TORQUE_COMP_MODEL=dynamics/calibration/compensation/history_q_qd.pt ./record/collect_demo.sh
+```
+
+## Force Estimation Evaluation
+
+Evaluate no-contact trajectories or LeRobot torque datasets with:
+
+```bash
+python -m dynamics.calibration.force_eval data/lerobot_torque_dataset_20260524_180129
+```
+
+Generate a conservative no-contact calibration trajectory without moving the robot:
+
+```bash
+python -m dynamics.main --mode traj --traj-kind safe --duration-s 180 --workspace-speed-deg-s 15
 ```

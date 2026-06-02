@@ -11,7 +11,7 @@ from dynamics.calibration.compensation.hybrid import HybridTorqueCompensator, tr
 from dynamics.calibration.compensation.static_bias import StaticBiasModel
 from dynamics.calibration.io import LowLatencyDifferentiator, extract_matrix, make_record, read_parquet, write_parquet
 from dynamics.calibration.train import train_from_torque_data
-from dynamics.calibration.workspace import estimate_workspace_bounds, generate_random_workspace_trajectory
+from dynamics.calibration.workspace import estimate_workspace_bounds, generate_random_workspace_trajectory, generate_safe_joint_trajectory
 from dynamics.config import load_config
 
 
@@ -88,6 +88,30 @@ class CalibrationIoTests(unittest.TestCase):
         dt = np.diff(timestamps)
         joint_speed = np.abs(np.diff(q_traj, axis=0)) / dt[:, None]
         self.assertLessEqual(float(np.max(joint_speed)), np.deg2rad(30.0) + 1e-9)
+
+
+    def test_safe_joint_trajectory_starts_near_home_and_respects_limits(self):
+        home = np.deg2rad(np.array([14.1, -8.0, -24.7, 196.9, 62.3, -8.8]))
+
+        q_traj, timestamps = generate_safe_joint_trajectory(
+            home,
+            duration_s=12.0,
+            hz=20.0,
+            speed_deg_s=15.0,
+            accel_deg_s2=60.0,
+            waypoint_count=3,
+            hold_s=1.0,
+            seed=4,
+        )
+
+        self.assertEqual(q_traj.shape[1], 6)
+        self.assertEqual(q_traj.shape[0], timestamps.shape[0])
+        np.testing.assert_allclose(q_traj[0], home)
+        self.assertGreaterEqual(float(timestamps[-1]), 12.0 - 1e-9)
+        np.testing.assert_allclose(q_traj[-1], home, atol=1e-12)
+        dt = np.diff(timestamps)
+        speed = np.abs(np.diff(q_traj, axis=0)) / dt[:, None]
+        self.assertLessEqual(float(np.nanmax(speed)), np.deg2rad(15.0) + 1e-6)
 
 
 class CompensationTests(unittest.TestCase):
@@ -411,6 +435,40 @@ class CompensationTests(unittest.TestCase):
 
         np.testing.assert_allclose(low.tau_comp, high.tau_comp)
         np.testing.assert_allclose(high.tau_external - low.tau_external, [10.0, 10.0])
+
+    def test_hybrid_runtime_limits_conservative_components(self):
+        class HighMotionModel:
+            history_steps = 0
+
+            def predict(self, q, qd, qdd, tau_model, motion_lambda, time_since_stop):
+                return np.array([5.0, -5.0], dtype=np.float64)
+
+        coefficients = np.zeros((2, 5), dtype=np.float64)
+        coefficients[:, 0] = 10.0
+        comp = HybridTorqueCompensator(
+            static_model=StaticBiasModel(coefficients=coefficients, residual_rmse=np.zeros(2), joint_count=2),
+            firmware_model=FirmwareStateModel.defaults(2, speed_threshold=0.1),
+            motion_model=HighMotionModel(),
+            metadata={
+                "runtime_limits": {
+                    "motion_abs_max_nm": 2.0,
+                    "firmware_abs_max_nm": 1.0,
+                    "comp_abs_max_nm": 2.5,
+                }
+            },
+        )
+
+        estimate = comp.update(
+            np.array([0.1, 0.2]),
+            np.array([0.3, 0.4]),
+            np.zeros(2),
+            np.zeros(2),
+            np.zeros(2),
+            timestamp=0.0,
+        )
+
+        np.testing.assert_allclose(estimate.tau_motion_comp, [2.0, -2.0])
+        np.testing.assert_allclose(estimate.tau_comp, [2.5, 2.5])
 
     def test_hybrid_runtime_passes_kinematic_history_to_motion_model(self):
         class CapturingMotionModel:

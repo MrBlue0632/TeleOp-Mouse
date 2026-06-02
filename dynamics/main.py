@@ -20,7 +20,7 @@ DEFAULT_TRAJ_DIR = Path("dynamics/calibration/traj")
 DEFAULT_TORQUE_DIR = Path("dynamics/calibration/torque")
 DEFAULT_COMPENSATION_PATH = Path("dynamics/calibration/compensation/compensation.pt")
 MODES = ("traj", "torque", "train", "monitor")
-TRAJ_KINDS = ("drag", "workspace", "all")
+TRAJ_KINDS = ("drag", "workspace", "safe", "all")
 
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:

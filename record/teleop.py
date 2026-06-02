@@ -110,6 +110,9 @@ SPEED_PRESETS = {
     "2": 1.0,
     "3": 2.0,
 }
+MOTION_KEYS = {"w", "a", "s", "d", "q", "e", "space", "shift"}
+VELOCITY_COMMAND_MIN_DURATION_S = 0.05
+VELOCITY_COMMAND_MAX_DURATION_S = 0.12
 
 
 class CameraStream:
@@ -304,6 +307,10 @@ class TeleopApp:
         self.robot_ip = robot_ip
         self.rate_hz = rate_hz
         self.control_hz = float(control_hz)
+        self.velocity_cmd_duration_s = max(
+            VELOCITY_COMMAND_MIN_DURATION_S,
+            min(VELOCITY_COMMAND_MAX_DURATION_S, 6.0 / max(self.control_hz, 1.0)),
+        )
         self.data_dir = data_dir
         self.camera_id = camera_id
         self.camera_dev = camera_dev
@@ -349,6 +356,7 @@ class TeleopApp:
 
         self.running = True
         self.lock = threading.Lock()
+        self.velocity_send_lock = threading.Lock()
 
         self.keys_down = set()
         self.mouse_dx = 0.0
@@ -494,6 +502,11 @@ class TeleopApp:
             "gripper_pos": float(self.gripper_pos),
             "torques": [0.0] * 7,
             "torque_external": [0.0] * 6,
+            "torque_external_direct": [0.0] * 6,
+            "torque_external_observer": [0.0] * 6,
+            "torque_estimator_confidence": 1.0,
+            "torque_valid_no_contact": 1.0,
+            "torque_stop_event_id": 0,
             "torque_model": [0.0] * 6,
             "torque_firmware_bias": [0.0] * 6,
             "torque_lambda": 0.0,
@@ -565,6 +578,31 @@ class TeleopApp:
                 "dtype": "float32",
                 "shape": (6,),
                 "names": ["J1", "J2", "J3", "J4", "J5", "J6"],
+            },
+            "observation.torque_external_direct": {
+                "dtype": "float32",
+                "shape": (6,),
+                "names": ["J1", "J2", "J3", "J4", "J5", "J6"],
+            },
+            "observation.torque_external_observer": {
+                "dtype": "float32",
+                "shape": (6,),
+                "names": ["J1", "J2", "J3", "J4", "J5", "J6"],
+            },
+            "observation.torque_estimator_confidence": {
+                "dtype": "float32",
+                "shape": (1,),
+                "names": ["confidence"],
+            },
+            "observation.torque_valid_no_contact": {
+                "dtype": "float32",
+                "shape": (1,),
+                "names": ["valid_no_contact"],
+            },
+            "observation.torque_stop_event_id": {
+                "dtype": "int64",
+                "shape": (1,),
+                "names": ["stop_event_id"],
             },
             "observation.torque_model": {
                 "dtype": "float32",
@@ -796,7 +834,11 @@ class TeleopApp:
 
     def stop_motion_now(self):
         try:
-            self.arm.vc_set_cartesian_velocity([0.0, 0.0, 0.0, 0.0, 0.0, 0.0], is_radian=False, duration=0)
+            self._call_velocity_command(
+                [0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+                duration=0,
+                check_mode=False,
+            )
         except Exception:
             pass
 
@@ -934,6 +976,8 @@ class TeleopApp:
         filtered = state.get("torques_filtered", [0.0] * 7)
         torques_filtered = [float(x) if x is not None else 0.0 for x in filtered]
         tau_external = state.get("torque_external", [0.0] * 6)
+        tau_external_direct = state.get("torque_external_direct", [0.0] * 6)
+        tau_external_observer = state.get("torque_external_observer", [0.0] * 6)
         tau_model = state.get("torque_model", [0.0] * 6)
         tau_static_bias = state.get("torque_static_bias", [0.0] * 6)
         tau_motion_comp = state.get("torque_motion_comp", [0.0] * 6)
@@ -953,6 +997,11 @@ class TeleopApp:
             "observation.torques": np.array(torques, dtype=np.float32),
             "observation.torques_filtered": np.array(torques_filtered, dtype=np.float32),
             "observation.torque_external": np.array(tau_external, dtype=np.float32),
+            "observation.torque_external_direct": np.array(tau_external_direct, dtype=np.float32),
+            "observation.torque_external_observer": np.array(tau_external_observer, dtype=np.float32),
+            "observation.torque_estimator_confidence": np.array([state.get("torque_estimator_confidence", 1.0)], dtype=np.float32),
+            "observation.torque_valid_no_contact": np.array([1.0 if state.get("torque_valid_no_contact", True) else 0.0], dtype=np.float32),
+            "observation.torque_stop_event_id": np.array([state.get("torque_stop_event_id", 0)], dtype=np.int64),
             "observation.torque_model": np.array(tau_model, dtype=np.float32),
             "observation.torque_static_bias": np.array(tau_static_bias, dtype=np.float32),
             "observation.torque_motion_comp": np.array(tau_motion_comp, dtype=np.float32),
@@ -1199,16 +1248,28 @@ class TeleopApp:
                 self.home_requested = True
 
     def on_key_release(self, key):
+        stop_now = False
         with self.lock:
             if key == self.Key.space:
                 self.keys_down.discard("space")
-                return
-            if key in (self.Key.shift, self.Key.shift_l, self.Key.shift_r):
+                released_motion = True
+            elif key in (self.Key.shift, self.Key.shift_l, self.Key.shift_r):
                 self.keys_down.discard("shift")
-                return
-            ch = getattr(key, "char", None)
-            if ch is not None:
-                self.keys_down.discard(ch.lower())
+                released_motion = True
+            else:
+                released_motion = False
+                ch = getattr(key, "char", None)
+                if ch is not None:
+                    ch = ch.lower()
+                    released_motion = ch in MOTION_KEYS
+                    self.keys_down.discard(ch)
+            if released_motion and not (self.keys_down & MOTION_KEYS):
+                self.mouse_dx = 0.0
+                self.mouse_dy = 0.0
+                self.last_velocity_cmd = [0.0] * 6
+                stop_now = True
+        if stop_now:
+            self.stop_motion_now()
 
     def on_mouse_move(self, x, y):
         with self.lock:
@@ -1314,15 +1375,28 @@ class TeleopApp:
         self.gripper_pos = clip(float(target_pos), self.gripper_min, self.gripper_max)
         self.arm.set_gripper_position(self.gripper_pos, wait=False, speed=self.gripper_speed, auto_enable=True)
 
+    def _call_velocity_command(self, vel, *, duration, check_mode=False, is_tool_coord=None):
+        kwargs = {
+            "is_radian": False,
+            "duration": duration,
+            "check_mode": check_mode,
+        }
+        if is_tool_coord is not None:
+            kwargs["is_tool_coord"] = is_tool_coord
+        lock = getattr(self, "velocity_send_lock", None)
+        if lock is None:
+            return self.arm.vc_set_cartesian_velocity(vel, **kwargs)
+        with lock:
+            return self.arm.vc_set_cartesian_velocity(vel, **kwargs)
+
     def send_velocity(self, vel):
         if not self.ensure_velocity_runtime_ready():
             return
         t0 = time.monotonic()
-        ret = self.arm.vc_set_cartesian_velocity(
+        ret = self._call_velocity_command(
             vel,
-            is_radian=False,
             is_tool_coord=self.use_tool_coord,
-            duration=0,
+            duration=self.velocity_cmd_duration_s,
             check_mode=False,
         )
         dt_ms = (time.monotonic() - t0) * 1000.0
@@ -1431,8 +1505,14 @@ class TeleopApp:
             "torques": torques,
             "torques_filtered": [float(x) if not np.isnan(x) else None for x in self.filtered_curr.tolist()],
             "torque_external": estimate["tau_external"].tolist(),
+            "torque_external_direct": estimate.get("tau_external_direct", np.zeros(6, dtype=np.float64)).tolist(),
+            "torque_external_observer": estimate.get("tau_external_observer", np.zeros(6, dtype=np.float64)).tolist(),
             "torque_external_raw": estimate.get("tau_external_raw", np.zeros(6, dtype=np.float64)).tolist(),
             "torque_external_deadzone": estimate.get("tau_external_deadzone", np.zeros(6, dtype=np.float64)).tolist(),
+            "torque_estimator_confidence": float(estimate.get("estimator_confidence", 1.0)),
+            "torque_valid_no_contact": bool(estimate.get("valid_no_contact", True)),
+            "torque_stop_phase": estimate.get("stop_phase", "static"),
+            "torque_stop_event_id": int(estimate.get("stop_event_id", 0)),
             "torque_model": estimate["tau_model"].tolist(),
             "torque_static_bias": estimate.get("tau_static_bias", np.zeros(6, dtype=np.float64)).tolist(),
             "torque_motion_comp": estimate.get("tau_motion_comp", np.zeros(6, dtype=np.float64)).tolist(),

@@ -10,10 +10,10 @@ import numpy as np
 from dynamics.backends import create_backend
 
 from .io import LowLatencyDifferentiator, make_record, timestamped_path, write_parquet
-from .workspace import estimate_workspace_bounds, generate_random_workspace_trajectory
+from .workspace import estimate_workspace_bounds, generate_random_workspace_trajectory, generate_safe_joint_trajectory
 
 
-TRAJ_KINDS = ("drag", "workspace", "all")
+TRAJ_KINDS = ("drag", "workspace", "safe", "all")
 
 
 def _capture_teach_records(
@@ -149,6 +149,56 @@ def record_workspace_trajectory(
     return path
 
 
+def record_safe_trajectory(
+    config: dict,
+    *,
+    output_dir: str | Path = "dynamics/calibration/traj",
+    duration_s: float | None = None,
+    hz: float | None = None,
+    speed_deg_s: float = 15.0,
+    accel_deg_s2: float = 60.0,
+    seed: int = 7,
+    waypoint_count: int = 18,
+) -> Path:
+    """Generate a conservative no-contact trajectory without moving hardware."""
+    robot = str(config.get("robot_name", "robot"))
+    joint_count = int(config.get("joint_count", 6))
+    sample_hz = float(hz or config.get("sampling_hz", 100))
+    home_deg = np.asarray(config.get("home_joints_deg", np.zeros(joint_count)), dtype=np.float64)[:joint_count]
+    q_traj, rel_timestamps = generate_safe_joint_trajectory(
+        np.deg2rad(home_deg),
+        duration_s=float(duration_s if duration_s is not None else 180.0),
+        hz=sample_hz,
+        speed_deg_s=speed_deg_s,
+        accel_deg_s2=accel_deg_s2,
+        seed=seed,
+        waypoint_count=waypoint_count,
+    )
+
+    diff = LowLatencyDifferentiator(joint_count)
+    start_time = time.time()
+    records: list[dict] = []
+    for rel_ts, q in zip(rel_timestamps, q_traj):
+        timestamp = start_time + float(rel_ts)
+        qd, qdd = diff.update(timestamp, q)
+        records.append(
+            make_record(
+                timestamp=timestamp,
+                robot=robot,
+                joint_count=joint_count,
+                mode="traj",
+                q=q,
+                qd=qd,
+                qdd=qdd,
+                traj_kind="safe_no_contact",
+            )
+        )
+
+    out = timestamped_path(output_dir, robot, "traj_safe")
+    path = write_parquet(records, out)
+    print(f"[TRAJ:safe] saved {len(records)} generated no-contact samples to {path}")
+    return path
+
 def record_trajectories(
     config: dict,
     *,
@@ -181,6 +231,16 @@ def record_trajectories(
             margin_ratio=workspace_margin_ratio,
             speed_deg_s=workspace_speed_deg_s,
             seed=workspace_seed,
+        )
+    if traj_kind == "safe":
+        return record_safe_trajectory(
+            config,
+            output_dir=output_dir,
+            duration_s=duration_s,
+            hz=hz,
+            speed_deg_s=min(float(workspace_speed_deg_s), 15.0),
+            seed=workspace_seed,
+            waypoint_count=workspace_points,
         )
     if traj_kind == "all":
         return [

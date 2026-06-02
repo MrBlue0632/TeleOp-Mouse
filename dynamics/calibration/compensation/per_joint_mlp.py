@@ -275,12 +275,33 @@ def train_per_joint_motion_model(
     hidden_dim: int = 64,
     seed: int = 7,
     history_steps: int = DEFAULT_HISTORY_STEPS,
+    sample_weight: np.ndarray | None = None,
+    loss_kind: str = "mse",
+    huber_delta: float = 1.0,
+    target_clip_abs: float | None = None,
 ) -> tuple[PerJointMotionModel, list[list[float]]]:
     q_arr = np.asarray(q, dtype=np.float64)
     if q_arr.ndim != 2:
         raise ValueError(f"q must have shape (N, J), got {q_arr.shape}")
     joint_count = int(q_arr.shape[1])
     target_arr = _as_matrix(target, joint_count, "target")
+    if target_clip_abs is not None:
+        target_arr = np.clip(target_arr, -float(target_clip_abs), float(target_clip_abs))
+    if sample_weight is None:
+        weight_arr = np.ones(q_arr.shape[0], dtype=np.float32)
+    else:
+        weight_arr = np.asarray(sample_weight, dtype=np.float32).reshape(-1)
+        if weight_arr.shape != (q_arr.shape[0],):
+            raise ValueError(f"sample_weight must have shape ({q_arr.shape[0]},), got {weight_arr.shape}")
+        weight_arr = np.clip(weight_arr, 0.0, np.inf)
+    fit_mask = weight_arr > 0.0
+    if np.count_nonzero(fit_mask) < max(2, joint_count):
+        fit_mask = np.ones(q_arr.shape[0], dtype=bool)
+        weight_arr = np.ones(q_arr.shape[0], dtype=np.float32)
+    normalized_loss = str(loss_kind).lower()
+    if normalized_loss not in {"mse", "huber"}:
+        raise ValueError("loss_kind must be mse or huber")
+
     torch.manual_seed(seed)
     history_features = build_motion_history_features(q_arr, qd, qdd, history_steps=history_steps)
 
@@ -304,22 +325,30 @@ def train_per_joint_motion_model(
             history_steps=history_steps,
         )
         y = target_arr[:, joint].astype(np.float32)
-        x_mean = x.mean(axis=0).astype(np.float32)
-        x_std = (x.std(axis=0) + 1e-6).astype(np.float32)
-        y_mean[joint] = float(y.mean())
-        y_std[joint] = float(y.std() + 1e-6)
+        x_fit = x[fit_mask]
+        y_fit = y[fit_mask]
+        x_mean = x_fit.mean(axis=0).astype(np.float32)
+        x_std = (x_fit.std(axis=0) + 1e-6).astype(np.float32)
+        y_mean[joint] = float(y_fit.mean())
+        y_std[joint] = float(y_fit.std() + 1e-6)
         x_norm = (x - x_mean) / x_std
         y_norm = (y - y_mean[joint]) / y_std[joint]
 
         model = JointMLP(int(x.shape[1]), hidden_dim=hidden_dim)
         opt = torch.optim.AdamW(model.parameters(), lr=lr)
-        loss_fn = nn.MSELoss()
         xt = torch.from_numpy(x_norm.astype(np.float32))
         yt = torch.from_numpy(y_norm.astype(np.float32))
+        wt = torch.from_numpy(weight_arr.astype(np.float32))
+        denom = torch.clamp(wt.sum(), min=1.0)
         losses: list[float] = []
         for _ in range(int(epochs)):
             opt.zero_grad(set_to_none=True)
-            loss = loss_fn(model(xt), yt)
+            pred = model(xt)
+            if normalized_loss == "huber":
+                err = torch.nn.functional.huber_loss(pred, yt, reduction="none", delta=float(huber_delta))
+            else:
+                err = (pred - yt) ** 2
+            loss = (err * wt).sum() / denom
             loss.backward()
             opt.step()
             losses.append(float(loss.detach().cpu().item()))

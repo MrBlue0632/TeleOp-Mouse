@@ -93,3 +93,21 @@ def test_rejects_unbounded_compensation_output():
     assert "too large" in estimate["compensation_error"]
     np.testing.assert_allclose(estimate["tau_motion_comp"], np.zeros(6))
     np.testing.assert_allclose(estimate["tau_external"], [0.5, 1.5, 1.0, 1.2, 0.5, 0.7])
+
+
+def test_stop_transition_spike_is_low_confidence_and_damped():
+    estimator = FirmwareBiasTorqueEstimator(dynamics=DummyDynamics(), filter_alpha=1.0)
+    q = np.zeros(6, dtype=np.float64)
+
+    moving = estimator.update(q, np.full(6, 3.0, dtype=np.float64), np.full(6, 10.0, dtype=np.float64))
+    assert moving["stop_phase"] == "motion"
+
+    spike_tau = np.array([10.0, 35.0, 30.0, 10.0, 10.0, 10.0], dtype=np.float64)
+    estimate = estimator.update(q, np.zeros(6, dtype=np.float64), spike_tau)
+
+    assert estimate["stop_phase"] == "settling"
+    assert estimate["estimator_confidence"] < 0.5
+    assert estimate["valid_no_contact"] is False
+    assert np.linalg.norm(estimate["tau_external_direct"]) > 10.0
+    assert np.linalg.norm(estimate["tau_external"]) < np.linalg.norm(estimate["tau_external_direct"])
+    assert estimate["stop_event_id"] == 1

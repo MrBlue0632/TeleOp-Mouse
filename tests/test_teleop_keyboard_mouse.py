@@ -1,6 +1,7 @@
 import pathlib
 import sys
 import time
+import types
 import unittest
 from unittest import mock
 
@@ -76,6 +77,15 @@ class TeleopLocalTests(unittest.TestCase):
         app.video_window = mock.Mock()
         app.video_window_scale = 1.0
         app.request_stop = mock.Mock()
+        app.Key = types.SimpleNamespace(
+            esc=object(),
+            space=object(),
+            shift=object(),
+            shift_l=object(),
+            shift_r=object(),
+            enter=object(),
+            tab=object(),
+        )
         app.keys_down = set()
         app.mouse_dx = 0.0
         app.mouse_dy = 0.0
@@ -94,6 +104,9 @@ class TeleopLocalTests(unittest.TestCase):
         app.alpha_rise = 0.35
         app.alpha_fall = 0.12
         app.velocity_mode_ready = True
+        app.velocity_cmd_duration_s = 0.05
+        app.velocity_send_lock = teleop.threading.Lock()
+        app.last_velocity_cmd = [0.0] * 6
         app.diag_send_cnt = 0
         app.diag_send_fail = 0
         app.diag_send_ms_sum = 0.0
@@ -158,9 +171,35 @@ class TeleopLocalTests(unittest.TestCase):
             [1, 2, 3, 4, 5, 6],
             is_radian=False,
             is_tool_coord=True,
-            duration=0,
+            duration=0.05,
             check_mode=False,
         )
+
+    def test_key_release_sends_immediate_stop_after_last_motion_key(self):
+        app = self._make_app()
+        app.keys_down = {"w"}
+        app.mouse_dx = 12.0
+        app.mouse_dy = -8.0
+        app.last_velocity_cmd = [60.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+        app.stop_motion_now = mock.Mock()
+
+        app.on_key_release(types.SimpleNamespace(char="w"))
+
+        self.assertEqual(app.keys_down, set())
+        self.assertEqual(app.mouse_dx, 0.0)
+        self.assertEqual(app.mouse_dy, 0.0)
+        self.assertEqual(app.last_velocity_cmd, [0.0] * 6)
+        app.stop_motion_now.assert_called_once()
+
+    def test_key_release_keeps_motion_when_another_motion_key_is_held(self):
+        app = self._make_app()
+        app.keys_down = {"w", "a"}
+        app.stop_motion_now = mock.Mock()
+
+        app.on_key_release(types.SimpleNamespace(char="w"))
+
+        self.assertEqual(app.keys_down, {"a"})
+        app.stop_motion_now.assert_not_called()
 
     def test_ensure_velocity_runtime_ready_allows_state_two(self):
         app = self._make_app()
@@ -226,6 +265,45 @@ class TeleopLocalTests(unittest.TestCase):
         stalled.close.assert_called_once()
         reopen.assert_called_once_with(app.camera_id, app.camera_dev)
         self.assertIs(app.camera, replacement)
+
+
+    def test_capture_episode_observation_records_torque_estimator_metadata(self):
+        app = self._make_app()
+        app.dashboard_state = None
+        app.task_description = "test"
+        app.lerobot_dataset = mock.Mock()
+
+        state = {
+            "joints_deg": [1, 2, 3, 4, 5, 6],
+            "joint_velocities_deg_s": [0.1, 0.2, 0.3, 0.4, 0.5, 0.6],
+            "gripper_pos": 123.0,
+            "torques": [0, 1, 2, 3, 4, 5, 6],
+            "torque_external": [1, 1, 1, 1, 1, 1],
+            "torque_external_direct": [2, 2, 2, 2, 2, 2],
+            "torque_external_observer": [3, 3, 3, 3, 3, 3],
+            "torque_estimator_confidence": 0.25,
+            "torque_valid_no_contact": False,
+            "torque_stop_event_id": 7,
+        }
+
+        app.capture_episode_observation(state)
+
+        frame = app.lerobot_dataset.add_frame.call_args.args[0]
+        np.testing.assert_allclose(frame["observation.torque_external_direct"], np.full(6, 2.0))
+        np.testing.assert_allclose(frame["observation.torque_external_observer"], np.full(6, 3.0))
+        np.testing.assert_allclose(frame["observation.torque_estimator_confidence"], [0.25])
+        np.testing.assert_allclose(frame["observation.torque_valid_no_contact"], [0.0])
+        np.testing.assert_array_equal(frame["observation.torque_stop_event_id"], np.array([7], dtype=np.int64))
+
+    def test_lerobot_features_include_torque_estimator_metadata(self):
+        app = self._make_app()
+        features = app._build_lerobot_features()
+
+        self.assertEqual(features["observation.torque_external_direct"]["dtype"], "float32")
+        self.assertEqual(features["observation.torque_external_observer"]["shape"], (6,))
+        self.assertEqual(features["observation.torque_estimator_confidence"]["shape"], (1,))
+        self.assertEqual(features["observation.torque_valid_no_contact"]["dtype"], "float32")
+        self.assertEqual(features["observation.torque_stop_event_id"]["dtype"], "int64")
 
 
 if __name__ == "__main__":
