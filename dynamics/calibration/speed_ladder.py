@@ -18,11 +18,13 @@ import pandas as pd
 from dynamics.calibration.io import LowLatencyDifferentiator, extract_matrix, make_record, read_parquet, write_parquet
 from dynamics.calibration.torque import collect_torque_data
 from dynamics.calibration.train import train_from_torque_data
-from dynamics.calibration.workspace import generate_safe_joint_trajectory
 from dynamics.config import load_config
 
 SPEED_TIERS = (15.0, 25.0, 35.0, 45.0)
 DEFAULT_CONTROL_HZ = 30.0
+DEFAULT_LOCAL_COUNT = 50
+DEFAULT_LOCAL_DURATION_S = 22.0
+DEFAULT_LOCAL_ACCEL_DEG_S2 = 200.0
 DEFAULT_HF_REPOS = (
     "DorayakiLin/xarm6_pick_bread_lerobot",
     "DorayakiLin/xarm6_pick_oreo_lerobot",
@@ -181,6 +183,98 @@ def _records_from_trajectory(
     return records
 
 
+def generate_full_duration_local_trajectory(
+    home_q_rad: np.ndarray,
+    *,
+    duration_s: float = DEFAULT_LOCAL_DURATION_S,
+    hz: float = DEFAULT_CONTROL_HZ,
+    amplitude_deg: Sequence[float] = DEFAULT_AMPLITUDE_DEG,
+    speed_deg_s: float = 15.0,
+    accel_deg_s2: float = DEFAULT_LOCAL_ACCEL_DEG_S2,
+    waypoint_count: int = 8,
+    seed: int = 7,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Generate a smooth home-return trajectory whose motion spans the full duration."""
+    home = np.asarray(home_q_rad, dtype=np.float64).reshape(-1)
+    joint_count = int(home.shape[0])
+    sample_hz = float(hz)
+    duration = float(duration_s)
+    speed_rad_s = math.radians(float(speed_deg_s))
+    accel_rad_s2 = math.radians(float(accel_deg_s2))
+    if joint_count <= 0:
+        raise ValueError("home_q_rad must contain at least one joint")
+    if sample_hz <= 0.0 or duration <= 0.0:
+        raise ValueError("hz and duration_s must be > 0")
+    if speed_rad_s <= 0.0 or accel_rad_s2 <= 0.0:
+        raise ValueError("speed_deg_s and accel_deg_s2 must be > 0")
+
+    amp_deg = np.asarray(amplitude_deg, dtype=np.float64).reshape(-1)
+    if amp_deg.size < joint_count:
+        amp_deg = np.pad(amp_deg, (0, joint_count - amp_deg.size), mode="edge")
+    amp_rad = np.deg2rad(np.abs(amp_deg[:joint_count]))
+    if not np.all(np.isfinite(amp_rad)) or np.any(amp_rad <= 0.0):
+        raise ValueError("amplitude_deg must contain positive finite values")
+
+    sample_count = int(round(duration * sample_hz)) + 1
+    timestamps = np.arange(sample_count, dtype=np.float64) / sample_hz
+    timestamps[-1] = duration
+    phase_t = timestamps / duration
+    envelope = np.sin(np.pi * phase_t) ** 2
+    rng = np.random.default_rng(int(seed))
+    q = np.repeat(home[None, :], sample_count, axis=0)
+    max_harmonic = max(3, int(round(float(speed_deg_s) / 3.0)))
+    component_count = max(2, min(4, int(max(1, waypoint_count)) // 2))
+
+    for joint_idx in range(joint_count):
+        harmonic_count = min(component_count, max_harmonic)
+        high = np.arange(max(1, max_harmonic - harmonic_count + 1), max_harmonic + 1, dtype=np.int64)
+        if high.shape[0] < harmonic_count:
+            low = np.arange(1, max_harmonic + 1, dtype=np.int64)
+            harmonics = np.unique(np.concatenate([low, high]))[-harmonic_count:]
+        else:
+            harmonics = high
+        rng.shuffle(harmonics)
+        coeffs = rng.uniform(0.5, 1.0, size=harmonics.shape[0]) * rng.choice([-1.0, 1.0], size=harmonics.shape[0])
+        coeffs[0] = np.sign(coeffs[0] if coeffs[0] else 1.0) * max(abs(float(coeffs[0])), 0.85)
+        norm = float(np.linalg.norm(coeffs))
+        coeffs = coeffs / norm
+        phases = rng.uniform(0.0, 2.0 * np.pi, size=harmonics.shape[0])
+        shape = np.zeros(sample_count, dtype=np.float64)
+        for harmonic, coeff, phase in zip(harmonics, coeffs, phases):
+            shape += float(coeff) * np.sin(2.0 * np.pi * int(harmonic) * phase_t + float(phase))
+        shape *= envelope
+        max_abs = float(np.max(np.abs(shape)))
+        if max_abs <= 1e-12:
+            continue
+        shape /= max_abs
+        amplitude_scale = 0.85 + 0.15 * float(rng.random())
+        q[:, joint_idx] += amp_rad[joint_idx] * amplitude_scale * shape
+
+    q[0] = home
+    q[-1] = home
+    q_delta = q - home[None, :]
+    dt = 1.0 / sample_hz
+    qd = np.gradient(q, dt, axis=0, edge_order=2)
+    qdd = np.gradient(qd, dt, axis=0, edge_order=2)
+    max_speed = float(np.nanmax(np.abs(qd)))
+    max_accel = float(np.nanmax(np.abs(qdd)))
+    scale = 1.0
+    if max_speed > speed_rad_s:
+        scale = min(scale, speed_rad_s / max_speed)
+    if max_accel > accel_rad_s2:
+        scale = min(scale, accel_rad_s2 / max_accel)
+    if scale < 1.0:
+        q = home[None, :] + q_delta * scale
+        q[0] = home
+        q[-1] = home
+
+    if not np.all(np.isfinite(q)):
+        raise ValueError("generated trajectory contains non-finite values")
+    if np.nanmax(np.abs(q - home[None, :]) - amp_rad[None, :]) > 1e-9:
+        raise ValueError("generated trajectory exceeds local amplitude envelope")
+    return q, timestamps
+
+
 def local_trajectory_path(root: str | Path, speed_deg_s: float, trajectory_id: str) -> Path:
     return ensure_root(root) / "traj" / "local" / _speed_dir(speed_deg_s) / f"{trajectory_id}.parquet"
 
@@ -198,11 +292,11 @@ def generate_local_trajectories(
     root: str | Path,
     *,
     speeds: Sequence[float] = SPEED_TIERS,
-    count: int = 100,
-    duration_s: float = 20.0,
+    count: int = DEFAULT_LOCAL_COUNT,
+    duration_s: float = DEFAULT_LOCAL_DURATION_S,
     hz: float = DEFAULT_CONTROL_HZ,
     amplitude_deg: Sequence[float] = DEFAULT_AMPLITUDE_DEG,
-    accel_deg_s2: float = 60.0,
+    accel_deg_s2: float = DEFAULT_LOCAL_ACCEL_DEG_S2,
     hold_s: float = 0.0,
     waypoint_count: int = 8,
     seed_base: int = 0,
@@ -229,14 +323,13 @@ def generate_local_trajectories(
             if resume and out.exists():
                 generated.append(out)
                 continue
-            q_traj, timestamps = generate_safe_joint_trajectory(
+            q_traj, timestamps = generate_full_duration_local_trajectory(
                 np.deg2rad(home_deg),
                 duration_s=float(duration_s),
                 hz=float(hz),
                 amplitude_deg=amp,
                 speed_deg_s=float(speed),
                 accel_deg_s2=float(accel_deg_s2),
-                hold_s=max(0.0, float(hold_s)),
                 waypoint_count=int(waypoint_count),
                 seed=seed,
             )
@@ -965,11 +1058,11 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--speeds", type=parse_float_csv, default=list(SPEED_TIERS))
     parser.add_argument("--resume", action="store_true", default=True)
     parser.add_argument("--no-resume", dest="resume", action="store_false")
-    parser.add_argument("--local-count", type=int, default=100)
-    parser.add_argument("--local-duration-s", type=float, default=20.0)
+    parser.add_argument("--local-count", type=int, default=DEFAULT_LOCAL_COUNT)
+    parser.add_argument("--local-duration-s", type=float, default=DEFAULT_LOCAL_DURATION_S)
     parser.add_argument("--local-hz", type=float, default=DEFAULT_CONTROL_HZ)
     parser.add_argument("--local-amplitude-deg", type=parse_amplitude, default=list(DEFAULT_AMPLITUDE_DEG))
-    parser.add_argument("--local-accel-deg-s2", type=float, default=60.0)
+    parser.add_argument("--local-accel-deg-s2", type=float, default=DEFAULT_LOCAL_ACCEL_DEG_S2)
     parser.add_argument("--local-hold-s", type=float, default=0.0)
     parser.add_argument("--local-waypoints", type=int, default=8)
     parser.add_argument("--local-seed-base", type=int, default=0)

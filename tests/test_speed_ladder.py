@@ -6,7 +6,7 @@ import numpy as np
 import pandas as pd
 
 from dynamics.calibration import speed_ladder as ladder
-from dynamics.calibration.io import make_record, read_parquet, write_parquet
+from dynamics.calibration.io import extract_matrix, make_record, read_parquet, write_parquet
 
 
 CONFIG = {
@@ -45,11 +45,17 @@ class SpeedLadderTests(unittest.TestCase):
         self.assertEqual(df.loc[0, "source_kind"], "local")
         self.assertEqual(df.loc[0, "speed_deg_s"], 15.0)
         self.assertEqual(df.loc[0, "trajectory_sample_hz"], 20.0)
+        self.assertEqual(len(df), 41)
         q_cols = [f"q_{idx}" for idx in range(1, 7)]
         q_deg = np.rad2deg(df[q_cols].to_numpy(dtype=np.float64))
+        qd_deg_s = np.rad2deg(extract_matrix(df, "qd", 6))
+        active = np.max(np.abs(qd_deg_s), axis=1) > 0.1
         home = np.asarray(CONFIG["home_joints_deg"], dtype=np.float64)
+        np.testing.assert_allclose(q_deg[0], home, atol=1e-6)
         np.testing.assert_allclose(q_deg[-1], home, atol=1e-6)
         self.assertTrue(np.all(np.abs(q_deg - home) <= np.asarray([2, 3, 4, 5, 6, 7]) + 1e-6))
+        self.assertGreater(float(np.sum(active)) / 20.0, 1.5)
+        self.assertLessEqual(float(np.nanmax(np.abs(qd_deg_s))), 15.5)
 
     def test_prepare_hf_uses_action_groups_episodes_and_records_skip_reason(self):
         repo = "DorayakiLin/xarm6_pick_bread_lerobot"
@@ -108,6 +114,12 @@ class SpeedLadderTests(unittest.TestCase):
 
     def test_speed_ladder_defaults_to_30hz_control_timing(self):
         self.assertEqual(ladder.DEFAULT_CONTROL_HZ, 30.0)
+        self.assertEqual(ladder.DEFAULT_LOCAL_COUNT, 50)
+        self.assertEqual(ladder.DEFAULT_LOCAL_DURATION_S, 22.0)
+        self.assertEqual(ladder.DEFAULT_LOCAL_ACCEL_DEG_S2, 200.0)
+        args = ladder.parse_args(["--stage", "generate-local"])
+        self.assertEqual(args.local_count, 50)
+        self.assertEqual(args.local_duration_s, 22.0)
         timestamps = ladder.hf_direct_timestamps(pd.DataFrame({"timestamp": [0.0, 1.0, 2.0]}), 3)
         np.testing.assert_allclose(timestamps, [0.0, 1.0 / 30.0, 2.0 / 30.0])
 
