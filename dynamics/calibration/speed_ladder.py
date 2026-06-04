@@ -35,6 +35,8 @@ DEFAULT_HF_REPOS = (
 DEFAULT_AMPLITUDE_DEG = (8.0, 6.0, 6.0, 10.0, 8.0, 8.0)
 DEFAULT_HF_MAX_STEP_DEG = 15.0
 DEFAULT_HF_REPLAY_SPEED_DEG_S = 30.0
+DEFAULT_MAX_FRAME_STEP_DEG = 15.0
+DEFAULT_MAX_TRACKING_ERROR_DEG = 15.0
 DEFAULT_OUTPUT_ROOT = Path("dynamics/calibration/speed_ladder_runs")
 DEFAULT_OLD_MODEL = Path("dynamics/calibration/compensation/history_q_qd.pt")
 DEFAULT_COMPENSATION_DIR = Path("dynamics/calibration/compensation")
@@ -592,7 +594,11 @@ def prepare_hf_trajectories(
             if resume and out.exists():
                 prepared.append(out)
                 continue
-            timestamps = hf_direct_timestamps(group, len(q_raw), hz=float(hz))
+            q_prepared, timestamps = retime_joint_trajectory(
+                q_raw,
+                speed_deg_s=float(hf_replay_speed_deg_s),
+                hz=float(hz),
+            )
             metadata = _trajectory_metadata(
                 root=root_path,
                 trajectory_id=trajectory_id,
@@ -607,7 +613,7 @@ def prepare_hf_trajectories(
             metadata["trajectory_sample_hz"] = float(hz)
             metadata["trajectory_duration_s"] = float(timestamps[-1] - timestamps[0]) if len(timestamps) else 0.0
             records = _records_from_trajectory(
-                q_traj_rad=q_raw,
+                q_traj_rad=q_prepared,
                 timestamps=timestamps,
                 robot=robot,
                 joint_count=joint_count,
@@ -707,6 +713,123 @@ def _summarize_torque_file(torque_path: str | Path, traj_path: str | Path) -> di
             summary["tracking_abs_p95_deg"] = round(float(np.nanpercentile(err_deg, 95)), 4)
     return summary
 
+
+
+
+def _joint_frame_step_details(matrix: np.ndarray) -> dict[str, Any]:
+    q = np.asarray(matrix, dtype=np.float64)
+    if q.ndim != 2 or q.shape[0] < 2:
+        return {"max_step_deg": 0.0, "max_step_from_row": 0, "max_step_to_row": 0, "max_step_joint": 0}
+    if not np.all(np.isfinite(q)):
+        return {"max_step_deg": float("inf"), "max_step_from_row": -1, "max_step_to_row": -1, "max_step_joint": -1}
+    steps = np.abs(np.rad2deg(np.diff(q, axis=0)))
+    if steps.size == 0:
+        return {"max_step_deg": 0.0, "max_step_from_row": 0, "max_step_to_row": 0, "max_step_joint": 0}
+    flat_idx = int(np.nanargmax(steps))
+    row = flat_idx // steps.shape[1]
+    joint = flat_idx % steps.shape[1]
+    return {
+        "max_step_deg": float(steps[row, joint]),
+        "max_step_from_row": int(row),
+        "max_step_to_row": int(row + 1),
+        "max_step_joint": int(joint + 1),
+    }
+
+
+def _validate_torque_frame_steps(
+    torque_path: str | Path,
+    traj_path: str | Path,
+    *,
+    max_step_deg: float = DEFAULT_MAX_FRAME_STEP_DEG,
+) -> tuple[bool, str, dict[str, Any]]:
+    df = read_parquet(torque_path)
+    traj_df = read_parquet(traj_path)
+    joint_count = len([col for col in df.columns if col.startswith("q_")])
+    if not joint_count:
+        return True, "ok", {"max_frame_step_deg": 0.0}
+
+    checks = (
+        ("observed", extract_matrix(df, "q", joint_count)),
+        ("reference", extract_matrix(traj_df, "q", joint_count)),
+    )
+    worst_source = ""
+    worst = {"max_step_deg": 0.0, "max_step_from_row": 0, "max_step_to_row": 0, "max_step_joint": 0}
+    for source, matrix in checks:
+        details = _joint_frame_step_details(matrix)
+        if float(details["max_step_deg"]) > float(worst["max_step_deg"]):
+            worst_source = source
+            worst = details
+    metrics = {
+        "max_frame_step_deg": round(float(worst["max_step_deg"]), 4),
+        "max_frame_step_source": worst_source,
+        "max_frame_step_joint": int(worst["max_step_joint"]),
+        "max_frame_step_from_row": int(worst["max_step_from_row"]),
+        "max_frame_step_to_row": int(worst["max_step_to_row"]),
+        "max_frame_step_limit_deg": float(max_step_deg),
+    }
+    if not np.isfinite(float(worst["max_step_deg"])):
+        return False, "non_finite_joint_angle", metrics
+    if float(worst["max_step_deg"]) > float(max_step_deg):
+        return False, "joint_frame_step_too_large", metrics
+    return True, "ok", metrics
+
+
+
+
+def _tracking_error_metrics(torque_path: str | Path, traj_path: str | Path) -> dict[str, Any]:
+    df = read_parquet(torque_path)
+    traj_df = read_parquet(traj_path)
+    joint_count = len([col for col in df.columns if col.startswith("q_")])
+    if not joint_count:
+        return {"tracking_abs_max_deg": 0.0, "tracking_abs_p95_deg": 0.0, "tracking_max_joint": 0, "tracking_max_row": 0}
+    q_obs = extract_matrix(df, "q", joint_count)
+    q_ref = extract_matrix(traj_df, "q", joint_count)
+    n = min(len(q_obs), len(q_ref))
+    if n <= 0:
+        return {"tracking_abs_max_deg": float("inf"), "tracking_abs_p95_deg": float("inf"), "tracking_max_joint": -1, "tracking_max_row": -1}
+    err = np.abs(np.rad2deg(q_obs[:n] - q_ref[:n]))
+    if not np.all(np.isfinite(err)):
+        return {"tracking_abs_max_deg": float("inf"), "tracking_abs_p95_deg": float("inf"), "tracking_max_joint": -1, "tracking_max_row": -1}
+    flat_idx = int(np.nanargmax(err))
+    row = flat_idx // err.shape[1]
+    joint = flat_idx % err.shape[1]
+    return {
+        "tracking_abs_max_deg": round(float(err[row, joint]), 4),
+        "tracking_abs_p95_deg": round(float(np.nanpercentile(err, 95)), 4),
+        "tracking_max_joint": int(joint + 1),
+        "tracking_max_row": int(row),
+        "tracking_limit_deg": float(DEFAULT_MAX_TRACKING_ERROR_DEG),
+    }
+
+
+def _validate_torque_tracking(
+    torque_path: str | Path,
+    traj_path: str | Path,
+    *,
+    max_tracking_deg: float = DEFAULT_MAX_TRACKING_ERROR_DEG,
+) -> tuple[bool, str, dict[str, Any]]:
+    metrics = _tracking_error_metrics(torque_path, traj_path)
+    max_err = float(metrics["tracking_abs_max_deg"])
+    metrics["tracking_limit_deg"] = float(max_tracking_deg)
+    if not np.isfinite(max_err):
+        return False, "non_finite_tracking_error", metrics
+    if max_err > float(max_tracking_deg):
+        return False, "tracking_abs_max_too_large", metrics
+    return True, "ok", metrics
+
+def _delete_torque_file(path: str | Path) -> bool:
+    torque_path = Path(path)
+    try:
+        torque_path.unlink()
+    except FileNotFoundError:
+        return False
+    parent = torque_path.parent
+    try:
+        if parent.exists() and not any(parent.iterdir()):
+            parent.rmdir()
+    except OSError:
+        pass
+    return True
 
 def _require_real_robot_ack(stage: str, acknowledged: bool) -> None:
     if stage in REAL_ROBOT_STAGES and not acknowledged:
@@ -837,7 +960,52 @@ def collect_one_torque_file(
     except Exception as exc:
         append_manifest(root, {"event": "torque_failed", "reason": type(exc).__name__, **_torque_metadata(root, entry)})
         raise
-    append_manifest(root, {"event": "torque_collected", "torque_path": str(path), **_torque_metadata(root, entry)})
+    ok, reason, frame_step_metrics = _validate_torque_frame_steps(
+        path,
+        entry.path,
+        max_step_deg=DEFAULT_MAX_FRAME_STEP_DEG,
+    )
+    if not ok:
+        deleted = _delete_torque_file(path)
+        append_manifest(
+            root,
+            {
+                "event": "torque_rejected",
+                "reason": reason,
+                "deleted_torque_path": str(path),
+                "deleted": bool(deleted),
+                **frame_step_metrics,
+                **_torque_metadata(root, entry),
+            },
+        )
+        raise RuntimeError(
+            f"torque data rejected for {entry.trajectory_id}: {reason} "
+            f"({frame_step_metrics.get('max_frame_step_deg')} deg > {DEFAULT_MAX_FRAME_STEP_DEG} deg)"
+        )
+    ok, reason, tracking_metrics = _validate_torque_tracking(
+        path,
+        entry.path,
+        max_tracking_deg=DEFAULT_MAX_TRACKING_ERROR_DEG,
+    )
+    if not ok:
+        deleted = _delete_torque_file(path)
+        append_manifest(
+            root,
+            {
+                "event": "torque_rejected",
+                "reason": reason,
+                "deleted_torque_path": str(path),
+                "deleted": bool(deleted),
+                **frame_step_metrics,
+                **tracking_metrics,
+                **_torque_metadata(root, entry),
+            },
+        )
+        raise RuntimeError(
+            f"torque data rejected for {entry.trajectory_id}: {reason} "
+            f"({tracking_metrics.get('tracking_abs_max_deg')} deg > {DEFAULT_MAX_TRACKING_ERROR_DEG} deg)"
+        )
+    append_manifest(root, {"event": "torque_collected", "torque_path": str(path), **frame_step_metrics, **tracking_metrics, **_torque_metadata(root, entry)})
     return path
 
 
